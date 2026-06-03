@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ig-saved-sorter"
+version = "0.1.0"
+description = "Organize Instagram saved media into topic folders using a local CLIP model."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "IG Saved Sorter contributors" }]
+keywords = ["instagram", "clip", "image-classification", "organizer", "cli"]
+
+# Core install is dependency-light. ML/video extras are opt-in so the CLI's
+# scanning/reporting and the test suite work without a heavy torch install.
+dependencies = []
+
+[project.optional-dependencies]
+clip = [
+    "torch>=2.0",
+    "open_clip_torch>=2.20",
+    "Pillow>=9.0",
+    "numpy>=1.23",
+]
+video = ["opencv-python>=4.7"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+ig-saved-sorter = "ig_saved_sorter.cli:main"
+
+[tool.setuptools]
+packages = ["ig_saved_sorter"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

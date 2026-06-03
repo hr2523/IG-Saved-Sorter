@@ -1,0 +1,8 @@
+# Core CLIP classification stack
+torch>=2.0
+open_clip_torch>=2.20
+Pillow>=9.0
+numpy>=1.23
+
+# Optional: enables classifying videos by sampling a representative frame
+opencv-python>=4.7
