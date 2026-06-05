@@ -153,6 +153,13 @@ It keeps a small state file (`<media-dir>/.sync_state.json`) of processed
 shortcodes for incremental updates, reuses a saved login session when present,
 and automatically attaches each post's URL/username to the sorted results.
 
+**Lightweight by default:** `sync` downloads only each post's small **cover
+thumbnail** (~tens of KB) — not full-resolution photos or videos. That's enough
+for CLIP to classify and for the web gallery to display, while keeping disk use
+tiny (a few MB instead of gigabytes; videos aren't downloaded at all). The "open
+↗" link in the web app always points to the original full post. Pass
+`--full-media` if you actually want the original files saved.
+
 > [!WARNING]
 > **This scrapes Instagram and is against their Terms of Service.** There is no
 > official API for saved posts, so `sync` reads private endpoints by logging in
@@ -204,6 +211,7 @@ ig-saved-sorter web ./ig_saved_media/sorted -u your_username --session-file ig_s
 | `--limit` | — | Max new posts to download this run. *(sync)* |
 | `--collection` | all saved | Fetch only this saved Collection by name. *(sync)* |
 | `--list-collections` | off | Print your Collections and exit. *(sync)* |
+| `--full-media` | off | Download full photos/videos instead of thumbnails. *(sync)* |
 | `--no-sort` | off | `sync`: download only, skip classification. |
 | `--host` / `--port` | `127.0.0.1` / `5000` | Web app bind address. *(web)* |
 

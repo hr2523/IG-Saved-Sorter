@@ -24,6 +24,7 @@ def _make_fetcher():
     f._collection_pk = None
     f._collection_name = None
     f.cl = None
+    f.thumbnails_only = False  # tests opt into thumbnail mode explicitly
     return f
 
 
@@ -119,8 +120,38 @@ def test_download_post_renames_to_shortcode(tmp_path):
 def test_download_video(tmp_path):
     f = _make_fetcher()
     f.cl = FakeClient()
+    f.thumbnails_only = False
     path = f.download_post(FakeMedia("Vid42", 7, media_type=2), tmp_path)
     assert path.name == "Vid42.mp4"
+
+
+def test_thumbnail_only_download(tmp_path, monkeypatch):
+    """Default thumbnail mode fetches the cover image, not full media/video."""
+    import ig_saved_sorter.fetcher as fmod
+
+    class FakeResp:
+        content = b"thumbnail-bytes"
+
+        def raise_for_status(self):
+            pass
+
+    captured = {}
+
+    def fake_get(url, timeout=0):
+        captured["url"] = url
+        return FakeResp()
+
+    monkeypatch.setattr("requests.get", fake_get)
+
+    f = _make_fetcher()
+    f.thumbnails_only = True
+    media = FakeMedia("Vid42", 7, media_type=2)
+    media.thumbnail_url = "https://cdn.example/thumb.jpg"
+
+    path = f.download_post(media, tmp_path)
+    assert path.name == "Vid42.jpg"           # .jpg cover, not .mp4
+    assert path.read_bytes() == b"thumbnail-bytes"
+    assert captured["url"] == "https://cdn.example/thumb.jpg"
 
 
 class SessionClient(FakeClient):

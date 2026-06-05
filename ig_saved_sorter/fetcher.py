@@ -121,7 +121,8 @@ _ALL_SAVED = "ALL_MEDIA_AUTO_COLLECTION"
 class InstagrapiFetcher:
     """Fetch saved posts / a named Collection using instagrapi."""
 
-    def __init__(self, delay_range: Optional[Tuple[int, int]] = (1, 3)) -> None:
+    def __init__(self, delay_range: Optional[Tuple[int, int]] = (1, 3),
+                 thumbnails_only: bool = True) -> None:
         try:
             from instagrapi import Client
         except ImportError as exc:  # pragma: no cover - needs the optional dep
@@ -141,6 +142,8 @@ class InstagrapiFetcher:
         self.username: Optional[str] = None
         self._collection_pk: Optional[str] = None
         self._collection_name: Optional[str] = None
+        # When True, download only the small cover thumbnail (no full media).
+        self.thumbnails_only = thumbnails_only
 
     # -- auth ----------------------------------------------------------------
     def login(
@@ -311,9 +314,36 @@ class InstagrapiFetcher:
             timestamp=ts,
         )
 
+    def _thumbnail_url(self, media) -> Optional[str]:
+        url = str(getattr(media, "thumbnail_url", "") or "")
+        if not url:
+            resources = getattr(media, "resources", None) or []
+            if resources:
+                url = str(getattr(resources[0], "thumbnail_url", "") or "")
+        return url or None
+
+    def download_thumbnail(self, media, media_dir: Path) -> Optional[Path]:
+        """Download just the small cover thumbnail (~tens of KB), no full media."""
+        import requests
+
+        url = self._thumbnail_url(media)
+        code = getattr(media, "code", None) or getattr(media, "pk", "item")
+        if not url:
+            return None
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+        except Exception as exc:
+            raise FetcherError(f"Failed to fetch thumbnail for {code}: {exc}") from exc
+        target = Path(media_dir) / f"{code}.jpg"
+        target.write_bytes(resp.content)
+        return target
+
     def download_post(self, media, media_dir: Path) -> Optional[Path]:
         media_dir = Path(media_dir)
         media_dir.mkdir(parents=True, exist_ok=True)
+        if self.thumbnails_only:
+            return self.download_thumbnail(media, media_dir)
         pk = media.pk
         media_type = getattr(media, "media_type", 1)
         product = getattr(media, "product_type", "") or ""

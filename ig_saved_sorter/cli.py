@@ -121,6 +121,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="List your saved Collections and exit (no download).",
     )
     sync_p.add_argument(
+        "--full-media", action="store_true",
+        help="Download full-resolution photos/videos instead of small thumbnails.",
+    )
+    sync_p.add_argument(
         "--no-sort", action="store_true",
         help="Only download new saves; skip classification.",
     )
@@ -141,6 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_p.add_argument("--session-file", help="Instagrapi session file for in-app sync.")
     web_p.add_argument("--media-dir", default="./ig_saved_media", help="Where sync downloads media.")
     web_p.add_argument("--state-file", help="Sync state file (default: <media-dir>/.sync_state.json).")
+    web_p.add_argument("--full-media", action="store_true", help="In-app sync downloads full media, not thumbnails.")
     web_p.add_argument("--threshold", type=float, default=0.15, help="Classification threshold for in-app sync.")
     web_p.add_argument("--strategy", choices=["copy", "move", "symlink"], default="copy")
     web_p.add_argument("--top-k", type=int, default=3)
@@ -341,6 +346,8 @@ def _cmd_sync(args, parser) -> int:
         print(f"\nError: {exc}", file=sys.stderr)
         return 2
 
+    fetcher.thumbnails_only = not args.full_media
+
     if args.list_collections:
         try:
             cols = fetcher.list_collections()
@@ -430,7 +437,9 @@ def _build_web_sync_hooks(args, sorted_dir, categories):
 
     def _ensure_fetcher():
         if "f" not in fetcher_holder:
-            fetcher_holder["f"] = _login_fetcher(args)
+            f = _login_fetcher(args)
+            f.thumbnails_only = not getattr(args, "full_media", False)
+            fetcher_holder["f"] = f
         return fetcher_holder["f"]
 
     def list_collections():
