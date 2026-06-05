@@ -284,11 +284,16 @@ class InstagrapiFetcher:
         amount = 999
         if self._collection_pk is not None:
             return self._call_medias(self.cl.collection_medias, self._collection_pk, amount)
-        # All saved posts. Prefer the by-name helper; fall back to the auto pk.
-        by_name = getattr(self.cl, "collection_medias_by_name", None)
-        if by_name is not None:
+        # All saved posts: the ALL_MEDIA_AUTO_COLLECTION constant is the
+        # documented route; the literal name "All Posts" raises CollectionNotFound
+        # on many versions, so only fall back to it if the constant route fails.
+        try:
+            return self._call_medias(self.cl.collection_medias, _ALL_SAVED, amount)
+        except Exception:
+            by_name = getattr(self.cl, "collection_medias_by_name", None)
+            if by_name is None:
+                raise
             return self._call_medias(by_name, "All Posts", amount)
-        return self._call_medias(self.cl.collection_medias, _ALL_SAVED, amount)
 
     def describe(self, media) -> SavedPost:
         ts = None
