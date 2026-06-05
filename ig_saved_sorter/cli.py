@@ -89,10 +89,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync_p.add_argument("-u", "--user", required=True, help="Your Instagram username.")
     sync_p.add_argument(
-        "--password",
-        help="Password (else $IG_PASSWORD, else prompt). A saved session is preferred.",
+        "--sessionid",
+        help="Browser 'sessionid' cookie (else $IG_SESSIONID). Skips password/2FA.",
     )
-    sync_p.add_argument("--session-file", help="Path to an Instaloader session file.")
+    sync_p.add_argument(
+        "--password",
+        help="Password (else $IG_PASSWORD, else prompt). A sessionid is preferred.",
+    )
+    sync_p.add_argument("--session-file", help="Path to a saved instagrapi session file.")
     sync_p.add_argument(
         "--media-dir", default="./ig_saved_media",
         help="Where to download saved media (default: ./ig_saved_media).",
@@ -133,6 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_p.add_argument("--categories-file", help="JSON taxonomy override.")
     # Optional: wire Instagram sync into the web UI (uses a saved session).
     web_p.add_argument("-u", "--user", help="Instagram username to enable in-app sync.")
+    web_p.add_argument("--sessionid", help="Browser sessionid cookie (else $IG_SESSIONID).")
     web_p.add_argument("--session-file", help="Instagrapi session file for in-app sync.")
     web_p.add_argument("--media-dir", default="./ig_saved_media", help="Where sync downloads media.")
     web_p.add_argument("--state-file", help="Sync state file (default: <media-dir>/.sync_state.json).")
@@ -248,6 +253,7 @@ def _login_fetcher(args):
     """
     from .fetcher import FetcherError, InstagrapiFetcher
 
+    sessionid = getattr(args, "sessionid", None) or os.environ.get("IG_SESSIONID")
     password = getattr(args, "password", None) or os.environ.get("IG_PASSWORD")
     interactive = sys.stdin.isatty()
 
@@ -277,18 +283,20 @@ def _login_fetcher(args):
     two_factor_cb = ask_2fa if interactive else None
     challenge_cb = ask_challenge if interactive else None
 
-    if password is None and interactive and not (
-        args.session_file and Path(args.session_file).exists()
-    ):
+    # Only prompt for a password if there's no sessionid and no saved session.
+    have_session = bool(args.session_file and Path(args.session_file).exists())
+    if password is None and not sessionid and interactive and not have_session:
         password = getpass.getpass(f"Instagram password for {args.user}: ")
 
     fetcher = InstagrapiFetcher()
-    attempts = 3 if interactive else 1
+    # No interactive retry needed when using a sessionid (no codes involved).
+    attempts = 1 if sessionid else (3 if interactive else 1)
     last_exc = None
     for i in range(attempts):
         try:
             fetcher.login(
                 args.user, password=password, session_file=args.session_file,
+                sessionid=sessionid,
                 two_factor_callback=two_factor_cb, challenge_callback=challenge_cb,
             )
             return fetcher

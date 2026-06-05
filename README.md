@@ -119,12 +119,35 @@ ig-saved-sorter sync -u your_username
 ig-saved-sorter sync -u your_username --limit 50 --no-sort
 ```
 
-**Two-factor authentication (2FA):** run the command **in an interactive
-terminal**. After your password it prompts for the one-time code — an
-authenticator-app code, an SMS code, **or an 8-digit backup code** — then saves a
-session so you won't be asked again. SMS codes are the least reliable for tools
-(Instagram often won't send them to automated logins); an **authenticator app or
-a backup code** is recommended.
+### Logging in (recommended: `--sessionid`)
+
+Password + 2FA + login-challenge flows are the flakiest part of any Instagram
+automation. The most reliable way in is to **reuse the session from a browser
+where you're already logged in**, which skips passwords, 2FA, and challenges
+entirely:
+
+1. In a desktop browser, log into `instagram.com`.
+2. Open DevTools → **Application/Storage → Cookies → `https://www.instagram.com`**.
+3. Copy the value of the **`sessionid`** cookie.
+4. Pass it (via env var so it stays out of your shell history):
+
+```bash
+export IG_SESSIONID="the_long_sessionid_value"   # Windows PowerShell: $env:IG_SESSIONID="..."
+ig-saved-sorter sync -u your_username --collection "Recipes"
+# (or pass --sessionid "..." directly)
+```
+
+> Your `sessionid` is as sensitive as your password — never share or commit it.
+
+**Password + 2FA (fallback):** run **in an interactive terminal**. After your
+password you'll be prompted for the right code, and the prompt tells you where it
+came from:
+- a **two-factor** step takes your authenticator code or an 8-digit **backup code**;
+- a **login challenge** ("confirm it's you") takes the 6-digit code Instagram
+  **emails/texts you for that login** — *not* your backup code.
+
+SMS is the least reliable (Instagram often won't send it to tooling); prefer
+`--sessionid`, an authenticator app, or a backup code.
 
 It keeps a small state file (`<media-dir>/.sync_state.json`) of processed
 shortcodes for incremental updates, reuses a saved login session when present,

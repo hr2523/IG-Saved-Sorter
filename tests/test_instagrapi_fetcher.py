@@ -121,3 +121,36 @@ def test_download_video(tmp_path):
     f.cl = FakeClient()
     path = f.download_post(FakeMedia("Vid42", 7, media_type=2), tmp_path)
     assert path.name == "Vid42.mp4"
+
+
+class SessionClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.sessionid = None
+
+    def login_by_sessionid(self, sid):
+        self.sessionid = sid
+        return True
+
+    def get_timeline_feed(self):
+        return {"ok": True}
+
+
+def test_login_by_sessionid_bypasses_password():
+    f = _make_fetcher()
+    f.cl = SessionClient()
+    f.login("me", sessionid="THE_COOKIE")  # no password, no callbacks
+    assert f.cl.sessionid == "THE_COOKIE"
+
+
+def test_login_by_sessionid_failure_raises():
+    f = _make_fetcher()
+
+    class Bad(SessionClient):
+        def get_timeline_feed(self):
+            raise RuntimeError("expired")
+
+    f.cl = Bad()
+    with pytest.raises(FetcherError) as exc:
+        f.login("me", sessionid="STALE")
+    assert "sessionid" in str(exc.value).lower()

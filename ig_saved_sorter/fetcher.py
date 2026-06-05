@@ -148,11 +148,15 @@ class InstagrapiFetcher:
         username: str,
         password: Optional[str] = None,
         session_file: Optional[str | Path] = None,
+        sessionid: Optional[str] = None,
         two_factor_callback: Optional[Callable[[], str]] = None,
         challenge_callback: Optional[Callable[[str], str]] = None,
     ) -> None:
-        """Log in, preferring a saved session file over a password.
+        """Log in, preferring a browser sessionid, then a saved session file,
+        then a password.
 
+        ``sessionid`` is the cookie from a browser where you're already logged
+        in; using it skips the password / 2FA / login-challenge flow entirely.
         Handles two-factor auth (``two_factor_callback`` supplies the one-time
         code) and login challenges (``challenge_callback`` supplies the
         emailed/texted code).
@@ -160,6 +164,22 @@ class InstagrapiFetcher:
         self.username = username
         if challenge_callback is not None:
             self.cl.challenge_code_handler = lambda u, choice: challenge_callback(str(choice))
+
+        # 0) A browser sessionid bypasses the whole login flow.
+        if sessionid:
+            try:
+                self.cl.login_by_sessionid(sessionid.strip())
+                self.cl.get_timeline_feed()  # validate
+            except Exception as exc:
+                raise FetcherError(
+                    f"Login by sessionid failed (is the cookie current?): {exc}"
+                ) from exc
+            if session_file:
+                try:
+                    self.cl.dump_settings(str(session_file))
+                except Exception:
+                    pass
+            return
 
         # 1) Reuse a saved session if present.
         if session_file and Path(session_file).exists():
@@ -174,8 +194,8 @@ class InstagrapiFetcher:
         # 2) Fresh login with password (+ 2FA if required).
         if not password:
             raise FetcherError(
-                "No valid saved session and no password provided. "
-                "Provide --password (or IG_PASSWORD), or create a session first."
+                "No sessionid, no valid saved session, and no password provided. "
+                "Provide --sessionid (recommended), --password, or IG_PASSWORD."
             )
         two_factor_exc = getattr(self._exceptions, "TwoFactorRequired", None) if self._exceptions else None
         try:
