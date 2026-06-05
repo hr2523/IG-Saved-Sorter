@@ -246,16 +246,33 @@ def _login_fetcher(args):
 
     Raises FetcherError on failure (caller converts to an exit code).
     """
-    from .fetcher import InstagrapiFetcher
+    from .fetcher import FetcherError, InstagrapiFetcher
 
     password = getattr(args, "password", None) or os.environ.get("IG_PASSWORD")
     interactive = sys.stdin.isatty()
 
     def ask_2fa() -> str:
-        return input("Enter the two-factor code (authenticator app, SMS, or backup code): ")
+        print(
+            "\nTwo-factor step: enter your authenticator-app code, an SMS code, "
+            "or an 8-digit backup code."
+        )
+        return input("Two-factor code: ").strip()
 
     def ask_challenge(choice: str) -> str:
-        return input(f"Enter the security code Instagram sent ({choice}): ")
+        # instagrapi passes the method: SMS (0) or EMAIL (1).
+        method = {
+            "0": "SMS text message", "1": "email",
+            "SMS": "SMS text message", "EMAIL": "email",
+        }.get(str(choice).upper(), f"'{choice}'")
+        print(
+            f"\nInstagram security check: it just sent a 6-digit code to your "
+            f"{method} for THIS login."
+        )
+        print(
+            "  -> Check there now (look in spam for email). This is NOT your "
+            "authenticator/backup code."
+        )
+        return input("Enter that 6-digit code: ").strip()
 
     two_factor_cb = ask_2fa if interactive else None
     challenge_cb = ask_challenge if interactive else None
@@ -266,11 +283,31 @@ def _login_fetcher(args):
         password = getpass.getpass(f"Instagram password for {args.user}: ")
 
     fetcher = InstagrapiFetcher()
-    fetcher.login(
-        args.user, password=password, session_file=args.session_file,
-        two_factor_callback=two_factor_cb, challenge_callback=challenge_cb,
-    )
-    return fetcher
+    attempts = 3 if interactive else 1
+    last_exc = None
+    for i in range(attempts):
+        try:
+            fetcher.login(
+                args.user, password=password, session_file=args.session_file,
+                two_factor_callback=two_factor_cb, challenge_callback=challenge_cb,
+            )
+            return fetcher
+        except FetcherError as exc:
+            last_exc = exc
+            msg = str(exc).lower()
+            retryable = any(
+                s in msg for s in ("security code", "check the", "challenge", "try again")
+            )
+            if i < attempts - 1 and retryable:
+                print(
+                    f"\nThat didn't work (attempt {i + 1}/{attempts}). Instagram "
+                    "may send a NEW code — let's try once more.\n"
+                    "Tip: approve the login in the Instagram app first if it asks.",
+                    file=sys.stderr,
+                )
+                continue
+            raise
+    raise last_exc  # pragma: no cover
 
 
 def _cmd_sync(args, parser) -> int:
