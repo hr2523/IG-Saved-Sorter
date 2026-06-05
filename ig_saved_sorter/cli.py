@@ -288,10 +288,10 @@ def _login_fetcher(args):
     two_factor_cb = ask_2fa if interactive else None
     challenge_cb = ask_challenge if interactive else None
 
-    # Only prompt for a password if there's no sessionid and no saved session.
-    have_session = bool(args.session_file and Path(args.session_file).exists())
-    if password is None and not sessionid and interactive and not have_session:
-        password = getpass.getpass(f"Instagram password for {args.user}: ")
+    def _prompt_password() -> Optional[str]:
+        if interactive and not sessionid:
+            return getpass.getpass(f"Instagram password for {args.user}: ")
+        return None
 
     fetcher = InstagrapiFetcher()
     # No interactive retry needed when using a sessionid (no codes involved).
@@ -308,6 +308,12 @@ def _login_fetcher(args):
         except FetcherError as exc:
             last_exc = exc
             msg = str(exc).lower()
+            # A saved session was missing/expired and we have no password yet:
+            # prompt for one and retry instead of giving up.
+            if password is None and ("no password" in msg or "no valid saved session" in msg):
+                password = _prompt_password()
+                if password:
+                    continue
             retryable = any(
                 s in msg for s in ("security code", "check the", "challenge", "try again")
             )
