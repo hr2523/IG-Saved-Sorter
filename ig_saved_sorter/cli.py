@@ -109,10 +109,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max number of NEW posts to download this run.",
     )
     sync_p.add_argument(
+        "--collection",
+        help="Fetch only this saved Collection (by name). Default: all saved posts.",
+    )
+    sync_p.add_argument(
+        "--list-collections", action="store_true",
+        help="List your saved Collections and exit (no download).",
+    )
+    sync_p.add_argument(
         "--no-sort", action="store_true",
         help="Only download new saves; skip classification.",
     )
     _add_sort_options(sync_p)
+
+    # web --------------------------------------------------------------------
+    web_p = sub.add_parser("web", help="Launch the interactive review web app.")
+    web_p.add_argument(
+        "sorted_dir", nargs="?", default="./ig_saved_media/sorted",
+        help="Folder containing manifest.json (default: ./ig_saved_media/sorted).",
+    )
+    web_p.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1).")
+    web_p.add_argument("--port", type=int, default=5000, help="Port (default: 5000).")
+    web_p.add_argument("--categories-file", help="JSON taxonomy override.")
+    # Optional: wire Instagram sync into the web UI (uses a saved session).
+    web_p.add_argument("-u", "--user", help="Instagram username to enable in-app sync.")
+    web_p.add_argument("--session-file", help="Instagrapi session file for in-app sync.")
+    web_p.add_argument("--media-dir", default="./ig_saved_media", help="Where sync downloads media.")
+    web_p.add_argument("--state-file", help="Sync state file (default: <media-dir>/.sync_state.json).")
+    web_p.add_argument("--threshold", type=float, default=0.15, help="Classification threshold for in-app sync.")
+    web_p.add_argument("--strategy", choices=["copy", "move", "symlink"], default="copy")
+    web_p.add_argument("--top-k", type=int, default=3)
+    web_p.add_argument("--model", default="ViT-B-32")
+    web_p.add_argument("--pretrained", default="laion2b_s34b_b79k")
+    web_p.add_argument("--device", default=None)
 
     # categories -------------------------------------------------------------
     cat_p = sub.add_parser("categories", help="Print the active taxonomy.")
@@ -137,7 +166,8 @@ def _progress(idx: int, total: int, item: ItemResult) -> None:
 
 
 def _run_sort(
-    args, categories, media_files, output_dir, shortcode_index
+    args, categories, media_files, output_dir,
+    shortcode_index=None, metadata_by_path=None,
 ) -> int:
     """Build the classifier, sort the files, write reports. Returns exit code."""
     print(
@@ -159,10 +189,10 @@ def _run_sort(
     report = sort_media(
         media_files, classifier, output_dir,
         strategy=args.strategy, top_k=args.top_k, threshold=args.threshold,
-        dry_run=args.dry_run, shortcode_index=shortcode_index,
-        on_progress=_progress,
+        dry_run=getattr(args, "dry_run", False), shortcode_index=shortcode_index,
+        metadata_by_path=metadata_by_path, on_progress=_progress,
     )
-    _report_summary(report, output_dir, args.dry_run)
+    _report_summary(report, output_dir, getattr(args, "dry_run", False))
     return 0
 
 
@@ -211,46 +241,72 @@ def _cmd_sort(args, parser) -> int:
     return _run_sort(args, categories, media_files, output_dir, shortcode_index)
 
 
-def _cmd_sync(args, parser) -> int:
-    from .fetcher import FetcherError, InstaloaderFetcher, sync_saved
+def _login_fetcher(args):
+    """Build an InstagrapiFetcher and log in, prompting interactively as needed.
 
-    media_dir = Path(args.media_dir)
-    state_file = Path(args.state_file) if args.state_file else media_dir / ".sync_state.json"
-    password = args.password or os.environ.get("IG_PASSWORD")
+    Raises FetcherError on failure (caller converts to an exit code).
+    """
+    from .fetcher import InstagrapiFetcher
 
+    password = getattr(args, "password", None) or os.environ.get("IG_PASSWORD")
     interactive = sys.stdin.isatty()
 
     def ask_2fa() -> str:
-        return input("Enter the 6-digit two-factor code (authenticator app or SMS): ")
+        return input("Enter the two-factor code (authenticator app, SMS, or backup code): ")
+
+    def ask_challenge(choice: str) -> str:
+        return input(f"Enter the security code Instagram sent ({choice}): ")
 
     two_factor_cb = ask_2fa if interactive else None
+    challenge_cb = ask_challenge if interactive else None
+
+    if password is None and interactive and not (
+        args.session_file and Path(args.session_file).exists()
+    ):
+        password = getpass.getpass(f"Instagram password for {args.user}: ")
+
+    fetcher = InstagrapiFetcher()
+    fetcher.login(
+        args.user, password=password, session_file=args.session_file,
+        two_factor_callback=two_factor_cb, challenge_callback=challenge_cb,
+    )
+    return fetcher
+
+
+def _cmd_sync(args, parser) -> int:
+    from .fetcher import FetcherError, sync_saved
+
+    media_dir = Path(args.media_dir)
+    state_file = Path(args.state_file) if args.state_file else media_dir / ".sync_state.json"
 
     try:
-        fetcher = InstaloaderFetcher()
-        # Only prompt for a password if there's no session to fall back on.
+        fetcher = _login_fetcher(args)
+    except FetcherError as exc:
+        print(f"\nError: {exc}", file=sys.stderr)
+        return 2
+
+    if args.list_collections:
         try:
-            fetcher.login(
-                args.user, password=password,
-                session_file=args.session_file, two_factor_callback=two_factor_cb,
-            )
-        except FetcherError:
-            if password is None and interactive:
-                password = getpass.getpass(f"Instagram password for {args.user}: ")
-                fetcher.login(
-                    args.user, password=password,
-                    session_file=args.session_file, two_factor_callback=two_factor_cb,
-                )
-            else:
-                raise
+            cols = fetcher.list_collections()
+        except Exception as exc:
+            print(f"\nError listing collections: {exc}", file=sys.stderr)
+            return 2
+        print(f"{len(cols)} collection(s):")
+        for name, count in cols:
+            print(f"  - {name}  ({count} posts)")
+        return 0
+
+    try:
+        fetcher.select_collection(args.collection)
     except FetcherError as exc:
         print(f"\nError: {exc}", file=sys.stderr)
         return 2
 
     def on_fetch(n: int, post: SavedPost) -> None:
-        who = post.username or "?"
-        print(f"  +{n} downloaded {post.shortcode} (@{who})")
+        print(f"  +{n} downloaded {post.shortcode} (@{post.username or '?'})")
 
-    print(f"Fetching saved posts as @{args.user} into {media_dir} ...")
+    where = f"collection '{args.collection}'" if args.collection else "all saved posts"
+    print(f"Fetching {where} as @{args.user} into {media_dir} ...")
     try:
         result = sync_saved(
             fetcher, media_dir, state_file, limit=args.limit, on_progress=on_fetch
@@ -271,9 +327,83 @@ def _cmd_sync(args, parser) -> int:
 
     categories = load_categories(args.categories_file)
     output_dir = Path(args.output) if args.output else media_dir / "sorted"
-    shortcode_index = build_shortcode_index(result.posts)
-    # Sort only the freshly downloaded files.
-    return _run_sort(args, categories, result.downloaded, output_dir, shortcode_index)
+    metadata_by_path = {str(p): post for p, post in zip(result.downloaded, result.posts)}
+    return _run_sort(
+        args, categories, result.downloaded, output_dir,
+        metadata_by_path=metadata_by_path,
+    )
+
+
+def _cmd_web(args, parser) -> int:
+    from .webapp import WebConfig, create_app
+
+    sorted_dir = Path(args.sorted_dir)
+    categories = list(load_categories(args.categories_file).keys())
+
+    list_collections = None
+    run_sync = None
+    if args.user:
+        # In-app sync reuses a saved session (no interactive 2FA in the browser).
+        list_collections, run_sync = _build_web_sync_hooks(args, sorted_dir, categories)
+
+    config = WebConfig(
+        sorted_dir=sorted_dir, categories=categories,
+        list_collections=list_collections, run_sync=run_sync,
+    )
+    try:
+        app = create_app(config)
+    except RuntimeError as exc:
+        print(f"\nError: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Serving review app for {sorted_dir} at http://{args.host}:{args.port}")
+    if not args.user:
+        print("(in-app Instagram sync disabled; pass --user to enable it)")
+    app.run(host=args.host, port=args.port)
+    return 0
+
+
+def _build_web_sync_hooks(args, sorted_dir, categories):
+    """Return (list_collections, run_sync) closures for the web app."""
+    from .fetcher import sync_saved
+
+    media_dir = Path(args.media_dir)
+    state_file = Path(args.state_file) if args.state_file else media_dir / ".sync_state.json"
+    cats = load_categories(args.categories_file)
+    fetcher_holder = {}
+
+    def _ensure_fetcher():
+        if "f" not in fetcher_holder:
+            fetcher_holder["f"] = _login_fetcher(args)
+        return fetcher_holder["f"]
+
+    def list_collections():
+        return _ensure_fetcher().list_collections()
+
+    def run_sync(collection, limit):
+        fetcher = _ensure_fetcher()
+        fetcher.select_collection(collection)
+        result = sync_saved(fetcher, media_dir, state_file, limit=limit)
+        summary = {"new_count": result.new_count, "skipped": result.skipped}
+        if result.new_count and not getattr(args, "no_sort", False):
+            from .classifier import build_classifier
+            from .sorter import sort_media, write_csv, write_manifest
+            classifier = build_classifier(
+                cats, model_name=args.model,
+                pretrained=args.pretrained, device=args.device,
+            )
+            meta = {str(p): post for p, post in zip(result.downloaded, result.posts)}
+            report = sort_media(
+                result.downloaded, classifier, sorted_dir,
+                strategy=args.strategy, top_k=args.top_k, threshold=args.threshold,
+                metadata_by_path=meta,
+            )
+            write_manifest(report, sorted_dir)
+            write_csv(report, sorted_dir)
+            summary["counts"] = report.counts
+        return summary
+
+    return list_collections, run_sync
 
 
 def _cmd_categories(args) -> int:
@@ -296,12 +426,14 @@ def main(argv=None) -> int:
             return _cmd_sort(args, parser)
         if args.command == "sync":
             return _cmd_sync(args, parser)
+        if args.command == "web":
+            return _cmd_web(args, parser)
         if args.command == "categories":
             return _cmd_categories(args)
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
 
-    parser.error("a subcommand is required (sort, sync, or categories)")
+    parser.error("a subcommand is required (sort, sync, web, or categories)")
     return 2  # unreachable; parser.error exits
 
 

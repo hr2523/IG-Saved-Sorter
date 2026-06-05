@@ -29,6 +29,9 @@ ig_saved_media/
 *.session
 session-*
 .session
+*.session.json
+instagrapi_settings.json
+ig_session*.json
 
 # OS
 .DS_Store

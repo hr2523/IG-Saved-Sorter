@@ -24,8 +24,9 @@ clip = [
     "numpy>=1.23",
 ]
 video = ["opencv-python>=4.7"]
-fetch = ["instaloader>=4.10"]
-dev = ["pytest>=7.0"]
+fetch = ["instagrapi>=2.0"]
+web = ["flask>=2.2"]
+dev = ["pytest>=7.0", "flask>=2.2"]
 
 [project.scripts]
 ig-saved-sorter = "ig_saved_sorter.cli:main"

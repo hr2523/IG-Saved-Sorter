@@ -47,9 +47,9 @@ def test_sync_requires_user():
         main(["sync"])
 
 
-def test_sync_missing_instaloader_returns_2(tmp_path, capsys):
-    # instaloader not installed -> FetcherError -> exit code 2.
+def test_sync_missing_instagrapi_returns_2(tmp_path, capsys):
+    # instagrapi not installed -> FetcherError -> exit code 2.
     rc = main(["sync", "-u", "someone", "--media-dir", str(tmp_path / "m")])
     err = capsys.readouterr().err
     assert rc == 2
-    assert "instaloader" in err.lower()
+    assert "instagrapi" in err.lower()

@@ -1,15 +1,17 @@
-"""Fetch saved posts from your own Instagram account via Instaloader.
+"""Fetch saved posts (and specific Collections) from your own Instagram account.
 
 This is an **opt-in** feature that logs in *as you* and reads your saved feed
-through Instagram's private endpoints (there is no official API for saved
-posts). Using it means automated access to your account, which is against
-Instagram's Terms of Service and can trigger rate limiting or checkpoints.
-Use it gently, on your own account, for personal organization only.
+through Instagram's private API (there is no official API for saved posts).
+Using it means automated access to your account, which is against Instagram's
+Terms of Service and can trigger rate limiting or login challenges. Use it
+gently, on your own account, for personal organization only.
 
-``instaloader`` is imported lazily so the rest of the package works without it.
+Backend: `instagrapi`, imported lazily so the rest of the package works without
+it. instagrapi has first-class support for saved Collections, so you can fetch a
+single collection by name instead of every saved post.
 
-The incremental sync core (:func:`sync_saved`) is decoupled from Instaloader via
-a small fetcher protocol, so it can be unit tested with a fake fetcher.
+The incremental sync core (:func:`sync_saved`) is decoupled from instagrapi via a
+small fetcher protocol, so it can be unit tested with a fake fetcher.
 """
 
 from __future__ import annotations
@@ -17,13 +19,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional, Protocol, Set
+from typing import Callable, List, Optional, Protocol, Set, Tuple
 
 from .metadata import SavedPost
 
 
 class FetcherError(RuntimeError):
-    """Raised for login/fetch problems (including missing dependency)."""
+    """Raised for login/fetch problems (including a missing dependency)."""
 
 
 class SavedPostFetcher(Protocol):
@@ -64,9 +66,7 @@ def load_state(path: str | Path) -> Set[str]:
 def save_state(path: str | Path, seen: Set[str]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"seen": sorted(seen)}, indent=2), encoding="utf-8"
-    )
+    path.write_text(json.dumps({"seen": sorted(seen)}, indent=2), encoding="utf-8")
 
 
 def sync_saved(
@@ -100,7 +100,7 @@ def sync_saved(
             save_state(state_path, seen)
         if path is not None:
             result.downloaded.append(Path(path))
-        result.posts.append(record)
+            result.posts.append(record)
 
         if on_progress:
             on_progress(result.new_count, record)
@@ -111,121 +111,187 @@ def sync_saved(
 
 
 # --------------------------------------------------------------------------- #
-# Instaloader-backed fetcher
+# instagrapi-backed fetcher (with Collections support)
 # --------------------------------------------------------------------------- #
 
-class InstaloaderFetcher:
-    """Fetch saved posts using Instaloader, logged in as the given user."""
+# Auto-collection that contains every saved post (instagrapi/Instagram naming).
+_ALL_SAVED = "ALL_MEDIA_AUTO_COLLECTION"
 
-    def __init__(self, quiet: bool = True) -> None:
+
+class InstagrapiFetcher:
+    """Fetch saved posts / a named Collection using instagrapi."""
+
+    def __init__(self, delay_range: Optional[Tuple[int, int]] = (1, 3)) -> None:
         try:
-            import instaloader  # noqa: F401
+            from instagrapi import Client
         except ImportError as exc:  # pragma: no cover - needs the optional dep
             raise FetcherError(
-                "'instaloader' is required for sync. Install it with: "
-                "pip install instaloader"
+                "'instagrapi' is required for sync. Install it with: "
+                "pip install instagrapi"
             ) from exc
-        self._il = instaloader
-        # Download just the media: no sidecar metadata/txt/thumbnails, and name
-        # files by shortcode so they match the saved_posts shortcode matcher.
-        self.L = instaloader.Instaloader(
-            quiet=quiet,
-            filename_pattern="{shortcode}",
-            download_video_thumbnails=False,
-            download_comments=False,
-            save_metadata=False,
-            compress_json=False,
-            post_metadata_txt_pattern="",
-        )
+        try:
+            import instagrapi.exceptions as _exc
+        except Exception:  # pragma: no cover
+            _exc = None
+        self._exceptions = _exc
+        self.cl = Client()
+        # Gentle, human-like pacing between private API calls.
+        if delay_range:
+            self.cl.delay_range = list(delay_range)
         self.username: Optional[str] = None
+        self._collection_pk: Optional[str] = None
+        self._collection_name: Optional[str] = None
 
+    # -- auth ----------------------------------------------------------------
     def login(
         self,
         username: str,
         password: Optional[str] = None,
         session_file: Optional[str | Path] = None,
         two_factor_callback: Optional[Callable[[], str]] = None,
+        challenge_callback: Optional[Callable[[str], str]] = None,
     ) -> None:
         """Log in, preferring a saved session file over a password.
 
-        If the account has two-factor authentication enabled,
-        ``two_factor_callback`` is called to obtain the one-time code. Without
-        it, a clear :class:`FetcherError` is raised explaining the options.
+        Handles two-factor auth (``two_factor_callback`` supplies the one-time
+        code) and login challenges (``challenge_callback`` supplies the
+        emailed/texted code).
         """
         self.username = username
-        # 1) Try an existing session (no password needed, fewer challenges).
-        try:
-            if session_file:
-                self.L.load_session_from_file(username, str(session_file))
-            else:
-                self.L.load_session_from_file(username)
-            return
-        except FileNotFoundError:
-            pass
-        except Exception as exc:  # corrupt/expired session -> fall through
-            if not password:
-                raise FetcherError(f"Could not load session: {exc}") from exc
+        if challenge_callback is not None:
+            self.cl.challenge_code_handler = lambda u, choice: challenge_callback(str(choice))
 
-        # 2) Fall back to a password login, then persist the session.
+        # 1) Reuse a saved session if present.
+        if session_file and Path(session_file).exists():
+            try:
+                self.cl.load_settings(str(session_file))
+                self.cl.login(username, password or "")
+                self.cl.get_timeline_feed()  # validate the session is alive
+                return
+            except Exception:
+                pass  # fall through to a fresh password login
+
+        # 2) Fresh login with password (+ 2FA if required).
         if not password:
             raise FetcherError(
-                "No saved session found and no password provided. "
-                "Provide --password (or IG_PASSWORD), or run instaloader once "
-                "to create a session file."
+                "No valid saved session and no password provided. "
+                "Provide --password (or IG_PASSWORD), or create a session first."
             )
-        two_factor_exc = getattr(
-            self._il.exceptions, "TwoFactorAuthRequiredException", None
-        )
+        two_factor_exc = getattr(self._exceptions, "TwoFactorRequired", None) if self._exceptions else None
         try:
             try:
-                self.L.login(username, password)
+                self.cl.login(username, password)
             except Exception as exc:
-                # Account has 2FA: complete it with a one-time code.
                 if two_factor_exc is not None and isinstance(exc, two_factor_exc):
                     if two_factor_callback is None:
                         raise FetcherError(
-                            "Two-factor authentication is required for this "
-                            "account. Re-run interactively so you can enter the "
-                            "code, or create a session once with: "
-                            f"instaloader --login={username}"
+                            "Two-factor authentication is required. Re-run "
+                            "interactively so you can enter the code."
                         ) from exc
                     code = (two_factor_callback() or "").strip()
-                    self.L.two_factor_login(code)
+                    self.cl.login(username, password, verification_code=code)
                 else:
                     raise
-            if session_file:
-                self.L.save_session_to_file(str(session_file))
-            else:
-                self.L.save_session_to_file()
         except FetcherError:
             raise
         except Exception as exc:
             raise FetcherError(f"Instagram login failed: {exc}") from exc
 
-    def iter_saved(self):
-        profile = self._il.Profile.own_profile(self.L.context)
-        return profile.get_saved_posts()
-
-    def describe(self, post) -> SavedPost:
-        ts = None
-        date = getattr(post, "date_utc", None)
-        if date is not None:
+        if session_file:
             try:
-                ts = int(date.timestamp())
+                self.cl.dump_settings(str(session_file))
+            except Exception:
+                pass
+
+    # -- collections ---------------------------------------------------------
+    def list_collections(self) -> List[Tuple[str, int]]:
+        """Return ``[(name, media_count), ...]`` for your saved Collections."""
+        out: List[Tuple[str, int]] = []
+        for c in self.cl.collections():
+            out.append((getattr(c, "name", "?"), int(getattr(c, "media_count", 0) or 0)))
+        return out
+
+    _ALL_NAMES = {"", "all", "all posts", "all saved"}
+
+    def select_collection(self, name: Optional[str]) -> None:
+        """Choose which collection :meth:`iter_saved` returns.
+
+        ``None`` (or "All Posts") means every saved post. A user collection name
+        is validated against your actual collections so you get a helpful error.
+        """
+        if not name or name.strip().lower() in self._ALL_NAMES:
+            self._collection_name = None
+            self._collection_pk = None
+            return
+        wanted = name.strip().lower()
+        for c in self.cl.collections():
+            if str(getattr(c, "name", "")).strip().lower() == wanted:
+                self._collection_name = getattr(c, "name", name)
+                self._collection_pk = str(getattr(c, "pk", "") or "") or None
+                return
+        available = ", ".join(n for n, _ in self.list_collections()) or "(none)"
+        raise FetcherError(f"Collection '{name}' not found. Available: {available}")
+
+    # -- fetching ------------------------------------------------------------
+    def iter_saved(self):
+        # amount=0 is meant to return everything but is buggy for saved
+        # collections; a large amount fetches all in practice (instagrapi #250).
+        amount = 999
+        if self._collection_pk is not None:
+            return self.cl.collection_medias(self._collection_pk, amount=amount)
+        # All saved posts. Prefer the by-name helper; fall back to the auto pk.
+        if hasattr(self.cl, "collection_medias_by_name"):
+            return self.cl.collection_medias_by_name("All Posts", amount=amount)
+        return self.cl.collection_medias(_ALL_SAVED, amount=amount)
+
+    def describe(self, media) -> SavedPost:
+        ts = None
+        taken = getattr(media, "taken_at", None)
+        if taken is not None:
+            try:
+                ts = int(taken.timestamp())
             except Exception:
                 ts = None
+        user = getattr(media, "user", None)
         return SavedPost(
-            url=f"https://www.instagram.com/p/{post.shortcode}/",
-            shortcode=post.shortcode,
-            username=getattr(post, "owner_username", None),
+            url=f"https://www.instagram.com/p/{media.code}/",
+            shortcode=getattr(media, "code", None),
+            username=getattr(user, "username", None) if user else None,
             timestamp=ts,
         )
 
-    def download_post(self, post, media_dir: Path) -> Optional[Path]:
+    def download_post(self, media, media_dir: Path) -> Optional[Path]:
         media_dir = Path(media_dir)
-        # Constant dirname pattern -> everything lands directly in media_dir.
-        self.L.dirname_pattern = str(media_dir)
-        self.L.download_post(post, target=media_dir.name or "saved")
-        matches = sorted(media_dir.glob(f"{post.shortcode}.*"))
-        media = [m for m in matches if m.suffix.lower() != ".json"]
-        return media[0] if media else None
+        media_dir.mkdir(parents=True, exist_ok=True)
+        pk = media.pk
+        media_type = getattr(media, "media_type", 1)
+        product = getattr(media, "product_type", "") or ""
+        try:
+            if media_type == 2 and product == "igtv":
+                path = self.cl.igtv_download(pk, folder=media_dir)
+            elif media_type == 2 and product == "clips":
+                path = self.cl.clip_download(pk, folder=media_dir)
+            elif media_type == 2:
+                path = self.cl.video_download(pk, folder=media_dir)
+            elif media_type == 8:
+                paths = self.cl.album_download(pk, folder=media_dir)
+                path = paths[0] if paths else None
+            else:
+                path = self.cl.photo_download(pk, folder=media_dir)
+        except Exception as exc:
+            raise FetcherError(f"Failed to download {getattr(media, 'code', pk)}: {exc}") from exc
+
+        if path is None:
+            return None
+        # Rename to a predictable, shortcode-based filename.
+        path = Path(path)
+        code = getattr(media, "code", None)
+        if code:
+            target = media_dir / f"{code}{path.suffix}"
+            if path != target:
+                try:
+                    path.replace(target)
+                    path = target
+                except OSError:
+                    pass
+        return path

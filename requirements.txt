@@ -7,5 +7,8 @@ numpy>=1.23
 # Optional: enables classifying videos by sampling a representative frame
 opencv-python>=4.7
 
-# Optional: enables `sync` (fetch your saved posts from Instagram by logging in)
-instaloader>=4.10
+# Optional: enables `sync` (fetch saved posts / a Collection from Instagram)
+instagrapi>=2.0
+
+# Optional: enables `web` (interactive review/re-categorize app)
+flask>=2.2

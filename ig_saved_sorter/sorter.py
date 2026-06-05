@@ -103,12 +103,18 @@ def sort_media(
     threshold: float = 0.0,
     dry_run: bool = False,
     shortcode_index: Optional[Dict[str, SavedPost]] = None,
+    metadata_by_path: Optional[Dict[str, SavedPost]] = None,
     on_progress: Optional[Callable[[int, int, ItemResult], None]] = None,
 ) -> SortReport:
     """Classify each file and place it under ``output_dir/<Category>/``.
 
     The folder placement uses the top prediction; the full top-k ranking is kept
     in the report. Files scoring below ``threshold`` go to *Uncategorized*.
+
+    Post metadata can be attached two ways: ``metadata_by_path`` maps an exact
+    source path to its :class:`SavedPost` (used by the instagrapi sync flow,
+    where we already know each file's origin); ``shortcode_index`` matches by the
+    post shortcode embedded in the filename (used by ``sort --export``).
     """
     output_dir = Path(output_dir)
     report = SortReport()
@@ -129,7 +135,9 @@ def sort_media(
         except Exception as exc:  # keep going on a single bad file
             item.error = f"{type(exc).__name__}: {exc}"
 
-        if shortcode_index:
+        if metadata_by_path and str(src) in metadata_by_path:
+            item.post = metadata_by_path[str(src)]
+        elif shortcode_index:
             item.post = match_file_to_post(src.name, shortcode_index)
 
         if not dry_run and item.error is None:
@@ -176,3 +184,18 @@ def write_csv(report: SortReport, output_dir: str | Path) -> Path:
                 ]
             )
     return path
+
+
+def recategorize_file(
+    current_path: str | Path, new_category: str, output_dir: str | Path
+) -> Path:
+    """Move an already-sorted file into ``output_dir/<new_category>/``.
+
+    Returns the new path. Used by the web app when you correct a classification.
+    """
+    current_path = Path(current_path)
+    if not current_path.exists():
+        raise FileNotFoundError(f"File not found: {current_path}")
+    dest = _safe_destination(Path(output_dir) / new_category, current_path.name)
+    _place(current_path, dest, "move")
+    return dest

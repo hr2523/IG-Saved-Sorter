@@ -59,17 +59,20 @@ pip install -r requirements.txt
 
 # Or install the package with just the extras you want:
 pip install -e ".[clip,video]"     # classification (+ video frames)
-pip install -e ".[fetch]"          # the `sync` command (Instaloader)
+pip install -e ".[fetch]"          # the `sync` command (instagrapi)
+pip install -e ".[web]"            # the `web` review app (Flask)
 ```
 
 > `torch`, `open_clip_torch`, and `Pillow` are required for classification.
 > `opencv-python` is optional and only needed to classify **videos**.
-> `instaloader` is optional and only needed for the `sync` command.
+> `instagrapi` is optional and only needed for the `sync` command.
+> `flask` is optional and only needed for the `web` review app.
 
 ## Usage
 
-The CLI has three subcommands: **`sort`** (local folder), **`sync`** (fetch from
-Instagram, then sort), and **`categories`** (inspect the taxonomy).
+The CLI has four subcommands: **`sort`** (local folder), **`sync`** (fetch from
+Instagram, then sort), **`web`** (interactive review app), and **`categories`**
+(inspect the taxonomy).
 
 ```bash
 # Sort a folder of saved media (copies files into ./saved_media/sorted/)
@@ -95,30 +98,33 @@ You can also run it as a module: `python -m ig_saved_sorter ...`
 
 ## Syncing directly from Instagram (experimental)
 
-The `sync` command logs into your account, downloads **only saved posts it
-hasn't seen before**, and sorts them — so you can re-run it to keep your folders
-up to date.
+The `sync` command (powered by [instagrapi](https://github.com/subzeroid/instagrapi))
+logs into your account, downloads **only saved posts it hasn't seen before**, and
+sorts them — so you can re-run it to keep your folders current. It supports
+fetching a **single saved Collection** by name.
 
 ```bash
 pip install -e ".[clip,fetch]"
 
-# First run logs in and downloads everything saved; later runs fetch only NEW saves
-ig-saved-sorter sync --user your_username
+# See your Collections (names you can pass to --collection)
+ig-saved-sorter sync -u your_username --list-collections
 
-# Limit how many new posts to pull, and just download without sorting
+# Fetch + sort just one Collection
+ig-saved-sorter sync -u your_username --collection "Recipes"
+
+# Or all saved posts; later runs fetch only NEW saves
+ig-saved-sorter sync -u your_username
+
+# Limit how many new posts to pull, and download without sorting
 ig-saved-sorter sync -u your_username --limit 50 --no-sort
 ```
 
-**Two-factor authentication (2FA):** if your account has 2FA enabled, run the
-command **in an interactive terminal** — after your password it will prompt for
-the one-time code from your authenticator app or SMS, then save a session so you
-won't need to repeat it. If you prefer, create the session once with Instaloader
-directly (it handles 2FA too) and `sync` will reuse it:
-
-```bash
-instaloader --login=your_username      # prompts for password + 2FA code once
-ig-saved-sorter sync --user your_username   # reuses that saved session
-```
+**Two-factor authentication (2FA):** run the command **in an interactive
+terminal**. After your password it prompts for the one-time code — an
+authenticator-app code, an SMS code, **or an 8-digit backup code** — then saves a
+session so you won't be asked again. SMS codes are the least reliable for tools
+(Instagram often won't send them to automated logins); an **authenticator app or
+a backup code** is recommended.
 
 It keeps a small state file (`<media-dir>/.sync_state.json`) of processed
 shortcodes for incremental updates, reuses a saved login session when present,
@@ -132,9 +138,27 @@ and automatically attaches each post's URL/username to the sorted results.
 > manual `sort` workflow avoids all of this.
 >
 > Credentials: pass `--password`, set `$IG_PASSWORD`, or you'll be prompted.
-> Prefer a saved Instaloader **session file** (`--session-file`) so you don't
-> log in repeatedly. Session files and `.sync_state.json` are git-ignored —
-> never commit them.
+> A reusable session is stored via `--session-file`. Session files and
+> `.sync_state.json` are git-ignored — never commit them.
+
+## Reviewing in the browser (`web`)
+
+The `web` command launches a local app to **visually confirm** what was fetched
+and sorted — a gallery grouped by category, with confidence bars, links back to
+the original posts, and a dropdown on each item to **re-categorize** it (which
+physically moves the file and updates the manifest).
+
+```bash
+pip install -e ".[clip,web]"
+
+# Review an existing sorted folder
+ig-saved-sorter web ./ig_saved_media/sorted          # open http://127.0.0.1:5000
+
+# Enable in-app fetching too (lists your Collections, "Fetch & sort" button).
+# Uses a saved session so it won't prompt for 2FA in the browser — log in once
+# via `sync` first to create the session.
+ig-saved-sorter web ./ig_saved_media/sorted -u your_username --session-file ig_session.json
+```
 
 ### Key options (sort / sync)
 
@@ -155,7 +179,10 @@ and automatically attaches each post's URL/username to the sorted results.
 | `--media-dir` | `./ig_saved_media` | Where `sync` downloads new saves. *(sync)* |
 | `--state-file` | `<media-dir>/.sync_state.json` | Tracks already-synced posts. *(sync)* |
 | `--limit` | — | Max new posts to download this run. *(sync)* |
+| `--collection` | all saved | Fetch only this saved Collection by name. *(sync)* |
+| `--list-collections` | off | Print your Collections and exit. *(sync)* |
 | `--no-sort` | off | `sync`: download only, skip classification. |
+| `--host` / `--port` | `127.0.0.1` / `5000` | Web app bind address. *(web)* |
 
 ## Custom categories
 
@@ -190,9 +217,11 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The scanning, metadata parsing, sorting, and reporting logic is fully unit
-tested **without** requiring torch (the test suite uses a fake classifier), so
-you can hack on the pipeline without the heavy ML install.
+The scanning, metadata parsing, sorting, fetching, web-app, and reporting logic
+is unit tested **without** requiring torch or instagrapi — the suite uses a fake
+classifier and a fake Instagram client, so you can hack on the pipeline without
+the heavy ML/login installs. (`flask` is included in the `dev` extra for the web
+app tests.)
 
 ## Notes & responsible use
 
