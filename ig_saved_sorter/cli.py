@@ -257,6 +257,11 @@ def _login_fetcher(args):
     password = getattr(args, "password", None) or os.environ.get("IG_PASSWORD")
     interactive = sys.stdin.isatty()
 
+    # Persist the session automatically so a successful login is reused next time.
+    if not getattr(args, "session_file", None):
+        base = Path(getattr(args, "media_dir", ".") or ".")
+        args.session_file = str(base / "ig_session.json")
+
     def ask_2fa() -> str:
         print(
             "\nTwo-factor step: enter your authenticator-app code, an SMS code, "
