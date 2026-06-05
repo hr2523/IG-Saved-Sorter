@@ -109,6 +109,17 @@ ig-saved-sorter sync --user your_username
 ig-saved-sorter sync -u your_username --limit 50 --no-sort
 ```
 
+**Two-factor authentication (2FA):** if your account has 2FA enabled, run the
+command **in an interactive terminal** — after your password it will prompt for
+the one-time code from your authenticator app or SMS, then save a session so you
+won't need to repeat it. If you prefer, create the session once with Instaloader
+directly (it handles 2FA too) and `sync` will reuse it:
+
+```bash
+instaloader --login=your_username      # prompts for password + 2FA code once
+ig-saved-sorter sync --user your_username   # reuses that saved session
+```
+
 It keeps a small state file (`<media-dir>/.sync_state.json`) of processed
 shortcodes for incremental updates, reuses a saved login session when present,
 and automatically attaches each post's URL/username to the sorted results.

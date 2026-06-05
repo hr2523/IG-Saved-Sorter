@@ -218,15 +218,28 @@ def _cmd_sync(args, parser) -> int:
     state_file = Path(args.state_file) if args.state_file else media_dir / ".sync_state.json"
     password = args.password or os.environ.get("IG_PASSWORD")
 
+    interactive = sys.stdin.isatty()
+
+    def ask_2fa() -> str:
+        return input("Enter the 6-digit two-factor code (authenticator app or SMS): ")
+
+    two_factor_cb = ask_2fa if interactive else None
+
     try:
         fetcher = InstaloaderFetcher()
         # Only prompt for a password if there's no session to fall back on.
         try:
-            fetcher.login(args.user, password=password, session_file=args.session_file)
+            fetcher.login(
+                args.user, password=password,
+                session_file=args.session_file, two_factor_callback=two_factor_cb,
+            )
         except FetcherError:
-            if password is None and sys.stdin.isatty():
+            if password is None and interactive:
                 password = getpass.getpass(f"Instagram password for {args.user}: ")
-                fetcher.login(args.user, password=password, session_file=args.session_file)
+                fetcher.login(
+                    args.user, password=password,
+                    session_file=args.session_file, two_factor_callback=two_factor_cb,
+                )
             else:
                 raise
     except FetcherError as exc:

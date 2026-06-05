@@ -144,8 +144,14 @@ class InstaloaderFetcher:
         username: str,
         password: Optional[str] = None,
         session_file: Optional[str | Path] = None,
+        two_factor_callback: Optional[Callable[[], str]] = None,
     ) -> None:
-        """Log in, preferring a saved session file over a password."""
+        """Log in, preferring a saved session file over a password.
+
+        If the account has two-factor authentication enabled,
+        ``two_factor_callback`` is called to obtain the one-time code. Without
+        it, a clear :class:`FetcherError` is raised explaining the options.
+        """
         self.username = username
         # 1) Try an existing session (no password needed, fewer challenges).
         try:
@@ -167,12 +173,32 @@ class InstaloaderFetcher:
                 "Provide --password (or IG_PASSWORD), or run instaloader once "
                 "to create a session file."
             )
+        two_factor_exc = getattr(
+            self._il.exceptions, "TwoFactorAuthRequiredException", None
+        )
         try:
-            self.L.login(username, password)
+            try:
+                self.L.login(username, password)
+            except Exception as exc:
+                # Account has 2FA: complete it with a one-time code.
+                if two_factor_exc is not None and isinstance(exc, two_factor_exc):
+                    if two_factor_callback is None:
+                        raise FetcherError(
+                            "Two-factor authentication is required for this "
+                            "account. Re-run interactively so you can enter the "
+                            "code, or create a session once with: "
+                            f"instaloader --login={username}"
+                        ) from exc
+                    code = (two_factor_callback() or "").strip()
+                    self.L.two_factor_login(code)
+                else:
+                    raise
             if session_file:
                 self.L.save_session_to_file(str(session_file))
             else:
                 self.L.save_session_to_file()
+        except FetcherError:
+            raise
         except Exception as exc:
             raise FetcherError(f"Instagram login failed: {exc}") from exc
 
