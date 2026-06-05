@@ -43,6 +43,11 @@ def _add_sort_options(parser: argparse.ArgumentParser) -> None:
         "--categories-file",
         help="JSON file overriding the default category->prompts taxonomy.",
     )
+    parser.add_argument(
+        "--caption-weight", type=float, default=0.55,
+        help="How much the post caption (vs the image) drives classification, "
+             "0-1 (default: 0.55; 0 = image only).",
+    )
     parser.add_argument("--model", default="ViT-B-32", help="open_clip model name.")
     parser.add_argument(
         "--pretrained", default="laion2b_s34b_b79k",
@@ -200,7 +205,9 @@ def _run_sort(
         media_files, classifier, output_dir,
         strategy=args.strategy, top_k=args.top_k, threshold=args.threshold,
         dry_run=getattr(args, "dry_run", False), shortcode_index=shortcode_index,
-        metadata_by_path=metadata_by_path, on_progress=_progress,
+        metadata_by_path=metadata_by_path,
+        caption_weight=getattr(args, "caption_weight", 0.55),
+        on_progress=_progress,
     )
     _report_summary(report, output_dir, getattr(args, "dry_run", False))
     return 0
@@ -462,6 +469,7 @@ def _build_web_sync_hooks(args, sorted_dir, categories):
                 result.downloaded, classifier, sorted_dir,
                 strategy=args.strategy, top_k=args.top_k, threshold=args.threshold,
                 metadata_by_path=meta,
+                caption_weight=getattr(args, "caption_weight", 0.55),
             )
             write_manifest(report, sorted_dir)
             write_csv(report, sorted_dir)

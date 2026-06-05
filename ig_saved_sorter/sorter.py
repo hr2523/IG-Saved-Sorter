@@ -104,6 +104,7 @@ def sort_media(
     dry_run: bool = False,
     shortcode_index: Optional[Dict[str, SavedPost]] = None,
     metadata_by_path: Optional[Dict[str, SavedPost]] = None,
+    caption_weight: float = 0.55,
     on_progress: Optional[Callable[[int, int, ItemResult], None]] = None,
 ) -> SortReport:
     """Classify each file and place it under ``output_dir/<Category>/``.
@@ -122,8 +123,19 @@ def sort_media(
 
     for idx, src in enumerate(media_files, start=1):
         item = ItemResult(source=str(src), category=UNCATEGORIZED, confidence=0.0)
+        # The caption (when we know the post) is a strong classification signal.
+        caption = None
+        if metadata_by_path and str(src) in metadata_by_path:
+            caption = getattr(metadata_by_path[str(src)], "caption", None)
         try:
-            predictions = classifier.classify_path(src, top_k=top_k, threshold=0.0)
+            try:
+                predictions = classifier.classify_path(
+                    src, top_k=top_k, threshold=0.0,
+                    caption=caption, caption_weight=caption_weight,
+                )
+            except TypeError:
+                # Classifier doesn't support captions (e.g. a test stub).
+                predictions = classifier.classify_path(src, top_k=top_k, threshold=0.0)
             item.predictions = predictions
             if predictions and predictions[0][1] >= threshold:
                 item.category, item.confidence = predictions[0]

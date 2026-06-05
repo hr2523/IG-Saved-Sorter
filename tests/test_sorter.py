@@ -123,6 +123,50 @@ def test_manifest_and_csv_written(tmp_path):
     assert len(data["items"][0]["predictions"]) == 2
 
 
+class CaptionAwareClassifier:
+    """Classifier that uses the caption when provided (mimics CLIP blending)."""
+
+    def __init__(self):
+        self.seen_captions = []
+
+    def classify_path(self, path, top_k=1, threshold=0.0, caption=None, caption_weight=0.5):
+        self.seen_captions.append(caption)
+        if caption and "artist" in caption.lower():
+            return [("Visual Art & Illustration", 0.95)]
+        return [("Memes & Humor", 0.6)]
+
+
+def test_caption_is_passed_and_used(tmp_path):
+    from ig_saved_sorter.metadata import SavedPost
+
+    src = tmp_path / "in"
+    src.mkdir()
+    f = src / "AAA.jpg"
+    f.write_bytes(b"data")
+    out = tmp_path / "out"
+
+    meta = {str(f): SavedPost(url="u", shortcode="AAA", username="x", timestamp=None,
+                              caption="Through his mixed media assemblages, the artist explores...")}
+    clf = CaptionAwareClassifier()
+    report = sort_media([f], clf, out, metadata_by_path=meta, threshold=0.15)
+
+    # Caption reached the classifier and steered the result away from "Memes".
+    assert clf.seen_captions == ["Through his mixed media assemblages, the artist explores..."]
+    assert report.items[0].category == "Visual Art & Illustration"
+
+
+def test_classifier_without_caption_support_still_works(tmp_path):
+    """A stub that doesn't accept caption kwargs is handled via TypeError fallback."""
+    src = tmp_path / "in"
+    src.mkdir()
+    (src / "pizza.jpg").write_bytes(b"data")
+    out = tmp_path / "out"
+
+    clf = FakeClassifier([("pizza", [("Food & Cooking", 0.9)])])
+    report = sort_media(list(src.glob("*.jpg")), clf, out, threshold=0.15)
+    assert report.items[0].category == "Food & Cooking"
+
+
 def test_export_enrichment(tmp_path):
     export = tmp_path / "saved_posts.json"
     export.write_text(json.dumps({

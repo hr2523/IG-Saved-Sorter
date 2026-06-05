@@ -108,9 +108,16 @@ DEFAULT_CATEGORIES: Dict[str, List[str]] = {
         "a do-it-yourself craft project",
         "handmade crafts and tutorials",
     ],
-    "Business & Finance": [
-        "a chart about business or finance",
-        "money, investing or marketing infographic",
+    "Business & Career": [
+        "business, finance or investing",
+        "a job, hiring or career opportunity post",
+        "an advertisement or marketing promotion",
+        "entrepreneurship, startups and productivity advice",
+    ],
+    "Graphic Design & Typography": [
+        "graphic design and typography",
+        "a poster, logo or branding design",
+        "lettering, fonts and type design",
     ],
     "Books & Education": [
         "books or reading",

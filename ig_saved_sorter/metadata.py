@@ -46,6 +46,7 @@ class SavedPost:
     shortcode: Optional[str]
     username: Optional[str]
     timestamp: Optional[int]
+    caption: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +54,7 @@ class SavedPost:
             "shortcode": self.shortcode,
             "username": self.username,
             "timestamp": self.timestamp,
+            "caption": self.caption,
         }
 
 

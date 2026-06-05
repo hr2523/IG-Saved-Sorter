@@ -20,7 +20,9 @@ saved_media/                      sorted/
 
 1. **Scan** a folder of downloaded saved media (images and videos).
 2. **Classify** each file with [open_clip](https://github.com/mlfoundations/open_clip)
-   using zero-shot scoring against a customizable topic taxonomy. Videos are
+   using zero-shot scoring against a customizable topic taxonomy. When a post
+   **caption** is available (via `sync`), its meaning is blended in — often the
+   decisive signal for text-heavy or visually ambiguous posts. Videos are
    classified from a sampled middle frame.
 3. **Sort** each file into `output/<Category>/` (copy, move, or symlink) and
    write a `manifest.json` + `manifest.csv` of every decision and confidence.
@@ -220,6 +222,7 @@ ig-saved-sorter web ./ig_saved_media/sorted -u your_username --session-file ig_s
 | `--threshold` | `0.15` | Min top-1 confidence (0–1); below it → `Uncategorized`. |
 | `--top-k` | `3` | Number of ranked predictions recorded per item. |
 | `--categories-file` | built-in | JSON taxonomy override (see below). |
+| `--caption-weight` | `0.55` | How much the caption (vs image) drives classification, 0–1. `0` = image only. |
 | `--export` | — | Path to Instagram `saved_posts.json`. |
 | `--model` / `--pretrained` | `ViT-B-32` / `laion2b_s34b_b79k` | open_clip model + weights. |
 | `--device` | auto | Force `cpu` or `cuda`. |

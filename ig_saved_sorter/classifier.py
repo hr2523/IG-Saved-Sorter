@@ -89,6 +89,7 @@ class ClipClassifier:
         )
         self.model = self.model.to(device).eval()
         tokenizer = open_clip.get_tokenizer(model_name)
+        self._tokenizer = tokenizer  # reused to embed captions at query time
 
         # Precompute one averaged, normalised text embedding per category.
         embeddings = []
@@ -102,17 +103,47 @@ class ClipClassifier:
         text_features = torch.stack(embeddings)
         self._text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-    def classify_pil(
-        self, image, top_k: int = 1, threshold: float = 0.0
-    ) -> Prediction:
-        """Classify a PIL image, returning up to ``top_k`` (category, score) pairs."""
+    def _image_similarity(self, image):
+        """Return raw cosine similarities of an image to each category."""
         torch = self._torch
         with torch.no_grad():
             tensor = self.preprocess(image).unsqueeze(0).to(self.device)
             feats = self.model.encode_image(tensor)
             feats = feats / feats.norm(dim=-1, keepdim=True)
-            logits = (100.0 * feats @ self._text_features.T).softmax(dim=-1)
-            probs = logits[0].cpu().tolist()
+            return (feats @ self._text_features.T)[0]
+
+    def _text_similarity(self, text: str):
+        """Return raw cosine similarities of a caption to each category."""
+        torch = self._torch
+        with torch.no_grad():
+            tokens = self._tokenizer([text]).to(self.device)
+            feats = self.model.encode_text(tokens)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+            return (feats @ self._text_features.T)[0]
+
+    def classify_pil(
+        self,
+        image,
+        top_k: int = 1,
+        threshold: float = 0.0,
+        caption: Optional[str] = None,
+        caption_weight: float = 0.55,
+    ) -> Prediction:
+        """Classify an image, optionally blending in the post caption.
+
+        When a non-empty ``caption`` is given, the caption's similarity to each
+        category is mixed with the image's (``caption_weight`` controls how much
+        the text matters — captions are often the stronger signal for text-heavy
+        or ambiguous posts). Scores are softmaxed into confidences.
+        """
+        torch = self._torch
+        sim = self._image_similarity(image)
+        caption = (caption or "").strip()
+        if caption:
+            # CLIP captions are capped at 77 tokens; a prefix is plenty.
+            text_sim = self._text_similarity(caption[:300])
+            sim = (1.0 - caption_weight) * sim + caption_weight * text_sim
+        probs = (100.0 * sim).softmax(dim=-1).cpu().tolist()
 
         ranked = sorted(
             zip(self.categories, probs), key=lambda kv: kv[1], reverse=True
@@ -121,13 +152,21 @@ class ClipClassifier:
         return ranked[: max(1, top_k)]
 
     def classify_path(
-        self, path: Path, top_k: int = 1, threshold: float = 0.0
+        self,
+        path: Path,
+        top_k: int = 1,
+        threshold: float = 0.0,
+        caption: Optional[str] = None,
+        caption_weight: float = 0.55,
     ) -> Prediction:
         """Classify a media file path. Returns ``[]`` if it can't be read."""
         image = load_image(Path(path))
         if image is None:
             return []
-        return self.classify_pil(image, top_k=top_k, threshold=threshold)
+        return self.classify_pil(
+            image, top_k=top_k, threshold=threshold,
+            caption=caption, caption_weight=caption_weight,
+        )
 
 
 def build_classifier(

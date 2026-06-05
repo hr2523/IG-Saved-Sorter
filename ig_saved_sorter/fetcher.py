@@ -307,11 +307,13 @@ class InstagrapiFetcher:
             except Exception:
                 ts = None
         user = getattr(media, "user", None)
+        caption = getattr(media, "caption_text", None)
         return SavedPost(
             url=f"https://www.instagram.com/p/{media.code}/",
             shortcode=getattr(media, "code", None),
             username=getattr(user, "username", None) if user else None,
             timestamp=ts,
+            caption=caption or None,
         )
 
     def _thumbnail_url(self, media) -> Optional[str]:
