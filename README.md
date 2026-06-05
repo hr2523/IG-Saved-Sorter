@@ -74,6 +74,27 @@ The CLI has four subcommands: **`sort`** (local folder), **`sync`** (fetch from
 Instagram, then sort), **`web`** (interactive review app), and **`categories`**
 (inspect the taxonomy).
 
+### One-time shortcut (skip the cd + activate dance)
+
+So you don't have to `cd` into the repo and activate the venv every new terminal,
+add a shortcut that points at the bundled launcher (`run.sh` / `run.ps1`), which
+does both for you:
+
+```bash
+# macOS / Linux (zsh) — run once from inside the repo:
+echo "alias igsort=\"$(pwd)/run.sh\"" >> ~/.zshrc && source ~/.zshrc
+
+# then, from ANY terminal:
+igsort sync -u your_username --collection "Recipes"
+igsort web ./ig_saved_media/sorted
+```
+
+```powershell
+# Windows PowerShell — run once from inside the repo:
+Add-Content $PROFILE "function igsort { & '$PWD\run.ps1' @args }" ; . $PROFILE
+igsort sync -u your_username --collection "Recipes"
+```
+
 ```bash
 # Sort a folder of saved media (copies files into ./saved_media/sorted/)
 ig-saved-sorter sort ./saved_media
