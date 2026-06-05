@@ -167,12 +167,19 @@ class InstagrapiFetcher:
 
         # 0) A browser sessionid bypasses the whole login flow.
         if sessionid:
+            sid = sessionid.strip().strip('"').strip("'")
             try:
-                self.cl.login_by_sessionid(sessionid.strip())
+                self.cl.login_by_sessionid(sid)
                 self.cl.get_timeline_feed()  # validate
             except Exception as exc:
                 raise FetcherError(
-                    f"Login by sessionid failed (is the cookie current?): {exc}"
+                    f"Login by sessionid failed: {exc}\n"
+                    "  Fixes, in order:\n"
+                    "  1) Update instagrapi:  pip install -U instagrapi\n"
+                    "  2) Copy a FRESH, COMPLETE sessionid from a browser that is "
+                    "currently logged into instagram.com (right-click the cookie "
+                    "row -> Copy value; don't truncate).\n"
+                    "  3) Make sure you didn't include surrounding quotes/spaces."
                 ) from exc
             if session_file:
                 try:
