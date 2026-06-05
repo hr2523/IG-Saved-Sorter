@@ -260,16 +260,35 @@ class InstagrapiFetcher:
         raise FetcherError(f"Collection '{name}' not found. Available: {available}")
 
     # -- fetching ------------------------------------------------------------
+    @staticmethod
+    def _call_medias(fn, key, amount):
+        """Call an instagrapi medias method tolerant of signature differences.
+
+        Across instagrapi versions the ``amount`` parameter may be keyword,
+        positional, or absent — try each before letting the error surface.
+        """
+        for attempt in (
+            lambda: fn(key, amount=amount),
+            lambda: fn(key, amount),
+            lambda: fn(key),
+        ):
+            try:
+                return attempt()
+            except TypeError:
+                continue
+        return fn(key)
+
     def iter_saved(self):
         # amount=0 is meant to return everything but is buggy for saved
         # collections; a large amount fetches all in practice (instagrapi #250).
         amount = 999
         if self._collection_pk is not None:
-            return self.cl.collection_medias(self._collection_pk, amount=amount)
+            return self._call_medias(self.cl.collection_medias, self._collection_pk, amount)
         # All saved posts. Prefer the by-name helper; fall back to the auto pk.
-        if hasattr(self.cl, "collection_medias_by_name"):
-            return self.cl.collection_medias_by_name("All Posts", amount=amount)
-        return self.cl.collection_medias(_ALL_SAVED, amount=amount)
+        by_name = getattr(self.cl, "collection_medias_by_name", None)
+        if by_name is not None:
+            return self._call_medias(by_name, "All Posts", amount)
+        return self._call_medias(self.cl.collection_medias, _ALL_SAVED, amount)
 
     def describe(self, media) -> SavedPost:
         ts = None

@@ -154,3 +154,22 @@ def test_login_by_sessionid_failure_raises():
     with pytest.raises(FetcherError) as exc:
         f.login("me", sessionid="STALE")
     assert "sessionid" in str(exc.value).lower()
+
+
+def test_iter_saved_tolerates_by_name_without_amount(tmp_path):
+    """All-saved path works even if collection_medias_by_name rejects amount."""
+    f = _make_fetcher()
+
+    class NoAmountClient:
+        def __init__(self):
+            self.called = None
+
+        def collection_medias_by_name(self, name):  # no amount kwarg/positional
+            self.called = name
+            return [FakeMedia("AAA", 1)]
+
+    f.cl = NoAmountClient()
+    f.select_collection(None)
+    out = list(f.iter_saved())
+    assert f.cl.called == "All Posts"
+    assert out[0].code == "AAA"
