@@ -24,6 +24,7 @@ clip = [
     "numpy>=1.23",
 ]
 video = ["opencv-python>=4.7"]
+fetch = ["instaloader>=4.10"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]

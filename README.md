@@ -28,21 +28,25 @@ saved_media/                      sorted/
    (`saved_posts.json`) so each item also records the original post URL,
    username, and save date.
 
+Steps 1–3 also run automatically from the optional **`sync`** command, which
+fetches new saved posts straight from your account (see the
+[experimental section](#syncing-directly-from-instagram-experimental)).
+
 ## Getting your saved media
 
-The classifier works on **image/video files**, which Instagram's official
-export does *not* include — the export only lists post URLs. You have two
-options:
+The classifier works on **image/video files**. You have two ways to get them:
 
-- **Download the files** using any Instagram media downloader you're authorized
-  to use, then point the tool at that folder. If the downloader names files with
-  the post *shortcode* (the `/p/<shortcode>/` part of the URL), pass
-  `--export saved_posts.json` to attach the original URL/username to each item.
-- Already have a folder of images/videos? Just sort those — the export is
-  entirely optional.
+1. **Automatic — `sync`** (logs into your account, downloads only *new* saves,
+   then sorts them). The most convenient, but it scrapes Instagram — see the
+   [important caveats](#syncing-directly-from-instagram-experimental) below.
+2. **Manual** — drop a folder of images/videos you already have (downloaded with
+   any tool you're authorized to use) and run `sort` on it. Optionally pass
+   `--export saved_posts.json` to attach each post's original URL/username
+   (matched by the `/p/<shortcode>/` in the filename).
 
-To get `saved_posts.json`: Instagram → *Settings → Accounts Center → Your
-information and permissions → Download your information* → request **JSON**.
+To get `saved_posts.json` for option 2: Instagram → *Settings → Accounts Center
+→ Your information and permissions → Download your information* → request
+**JSON**. (The official export lists post URLs only — not the media files.)
 
 ## Installation
 
@@ -53,38 +57,75 @@ cd IG-Saved-Sorter
 # Core CLIP stack (PyTorch is a large download)
 pip install -r requirements.txt
 
-# Or install the package with extras:
-pip install -e ".[clip,video]"
+# Or install the package with just the extras you want:
+pip install -e ".[clip,video]"     # classification (+ video frames)
+pip install -e ".[fetch]"          # the `sync` command (Instaloader)
 ```
 
 > `torch`, `open_clip_torch`, and `Pillow` are required for classification.
 > `opencv-python` is optional and only needed to classify **videos**.
+> `instaloader` is optional and only needed for the `sync` command.
 
 ## Usage
 
+The CLI has three subcommands: **`sort`** (local folder), **`sync`** (fetch from
+Instagram, then sort), and **`categories`** (inspect the taxonomy).
+
 ```bash
 # Sort a folder of saved media (copies files into ./saved_media/sorted/)
-ig-saved-sorter ./saved_media
+ig-saved-sorter sort ./saved_media
 
 # Choose an output location and move instead of copy
-ig-saved-sorter ./saved_media -o ./organized --strategy move
+ig-saved-sorter sort ./saved_media -o ./organized --strategy move
 
 # Preview decisions without touching files
-ig-saved-sorter ./saved_media --dry-run
+ig-saved-sorter sort ./saved_media --dry-run
 
 # Attach original post URLs/usernames from your IG export
-ig-saved-sorter ./saved_media --export ./saved_posts.json
+ig-saved-sorter sort ./saved_media --export ./saved_posts.json
 
 # Use your own categories and a higher confidence cutoff
-ig-saved-sorter ./saved_media --categories-file categories.example.json --threshold 0.25
+ig-saved-sorter sort ./saved_media --categories-file categories.example.json --threshold 0.25
 
 # Inspect the active categories
-ig-saved-sorter --list-categories
+ig-saved-sorter categories          # or: ig-saved-sorter --list-categories
 ```
 
 You can also run it as a module: `python -m ig_saved_sorter ...`
 
-### Key options
+## Syncing directly from Instagram (experimental)
+
+The `sync` command logs into your account, downloads **only saved posts it
+hasn't seen before**, and sorts them — so you can re-run it to keep your folders
+up to date.
+
+```bash
+pip install -e ".[clip,fetch]"
+
+# First run logs in and downloads everything saved; later runs fetch only NEW saves
+ig-saved-sorter sync --user your_username
+
+# Limit how many new posts to pull, and just download without sorting
+ig-saved-sorter sync -u your_username --limit 50 --no-sort
+```
+
+It keeps a small state file (`<media-dir>/.sync_state.json`) of processed
+shortcodes for incremental updates, reuses a saved login session when present,
+and automatically attaches each post's URL/username to the sorted results.
+
+> [!WARNING]
+> **This scrapes Instagram and is against their Terms of Service.** There is no
+> official API for saved posts, so `sync` reads private endpoints by logging in
+> as you. This can trigger rate limits, login challenges, or account action. Use
+> it sparingly, on your **own** account, for personal organization only. The
+> manual `sort` workflow avoids all of this.
+>
+> Credentials: pass `--password`, set `$IG_PASSWORD`, or you'll be prompted.
+> Prefer a saved Instaloader **session file** (`--session-file`) so you don't
+> log in repeatedly. Session files and `.sync_state.json` are git-ignored —
+> never commit them.
+
+### Key options (sort / sync)
 
 | Option | Default | Description |
 | --- | --- | --- |
@@ -96,8 +137,14 @@ You can also run it as a module: `python -m ig_saved_sorter ...`
 | `--export` | — | Path to Instagram `saved_posts.json`. |
 | `--model` / `--pretrained` | `ViT-B-32` / `laion2b_s34b_b79k` | open_clip model + weights. |
 | `--device` | auto | Force `cpu` or `cuda`. |
-| `--no-recursive` | off | Don't descend into subfolders. |
+| `--no-recursive` | off | Don't descend into subfolders. *(sort)* |
 | `--dry-run` | off | Classify and report only. |
+| `--user` | — | Instagram username to log in as. *(sync, required)* |
+| `--password` / `--session-file` | — | Auth: password (or `$IG_PASSWORD`) / reusable session. *(sync)* |
+| `--media-dir` | `./ig_saved_media` | Where `sync` downloads new saves. *(sync)* |
+| `--state-file` | `<media-dir>/.sync_state.json` | Tracks already-synced posts. *(sync)* |
+| `--limit` | — | Max new posts to download this run. *(sync)* |
+| `--no-sort` | off | `sync`: download only, skip classification. |
 
 ## Custom categories
 
