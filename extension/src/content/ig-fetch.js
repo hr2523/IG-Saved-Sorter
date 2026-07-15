@@ -9,6 +9,11 @@
 (() => {
   "use strict";
 
+  // Guard against double-injection (manifest content_script + on-demand
+  // executeScript): only the first run wires up the listener.
+  if (window.__igssFetchLoaded) return;
+  window.__igssFetchLoaded = true;
+
   const IG_APP_ID = "936619743392459"; // the public web app id IG uses
   const API = "https://www.instagram.com/api/v1";
 

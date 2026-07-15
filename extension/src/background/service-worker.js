@@ -24,14 +24,34 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // --- instagram tab + content script -------------------------------------
 async function getInstagramTab() {
   const tabs = await chrome.tabs.query({ url: "https://www.instagram.com/*" });
-  if (tabs.length) return tabs[0].id;
-  // Open one in the background and wait for the content script to be ready.
-  const tab = await chrome.tabs.create({
-    url: "https://www.instagram.com/",
-    active: false,
-  });
-  await waitForContentScript(tab.id);
-  return tab.id;
+  let tabId;
+  if (tabs.length) {
+    tabId = tabs[0].id;
+  } else {
+    // Open one in the background.
+    const tab = await chrome.tabs.create({
+      url: "https://www.instagram.com/",
+      active: false,
+    });
+    tabId = tab.id;
+    await sleep(1500); // let it start loading before we inject
+  }
+  // Inject the fetch script on demand — the tab may predate the extension load,
+  // in which case the manifest content script was never injected.
+  await ensureContentScript(tabId);
+  await waitForContentScript(tabId);
+  return tabId;
+}
+
+async function ensureContentScript(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["src/content/ig-fetch.js"],
+    });
+  } catch (_) {
+    /* page may still be loading or not injectable; PING loop will catch it */
+  }
 }
 
 async function waitForContentScript(tabId, tries = 20) {
