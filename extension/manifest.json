@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "IG Saved Sorter",
+  "version": "0.1.0",
+  "description": "Organize your Instagram saved posts into topic categories, in your browser. Reads your own saved posts via your logged-in session; classifies them locally with CLIP.",
+  "permissions": ["storage", "offscreen", "tabs", "scripting"],
+  "host_permissions": [
+    "https://www.instagram.com/*",
+    "https://i.instagram.com/*",
+    "https://*.cdninstagram.com/*",
+    "https://*.fbcdn.net/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["src/content/ig-fetch.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "IG Saved Sorter",
+    "default_popup": "src/popup/popup.html"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/lib/transformers.min.js",
+        "src/wasm/*",
+        "src/offscreen/offscreen.html"
+      ],
+      "matches": ["https://www.instagram.com/*"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https://huggingface.co https://*.hf.co https://cdn.jsdelivr.net https://*.cdninstagram.com https://*.fbcdn.net https://www.instagram.com;"
+  }
+}

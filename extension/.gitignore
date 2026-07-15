@@ -1,0 +1,9 @@
+# Vendored at setup time (large binaries) — regenerate with setup.sh
+src/lib/transformers.min.js
+src/wasm/
+
+# npm build deps used only by setup.sh
+node_modules/
+package.json
+package-lock.json
+.igss-entry.mjs

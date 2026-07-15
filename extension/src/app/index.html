@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IG Saved Sorter</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <header>
+      <div class="titles">
+        <h1>IG Saved Sorter</h1>
+        <div class="sub" id="summary">Loading…</div>
+      </div>
+      <div class="controls">
+        <input id="collection" list="collections" placeholder="Collection (blank = all saved)" />
+        <datalist id="collections"></datalist>
+        <input id="limit" type="number" min="1" placeholder="limit" />
+        <button class="primary" id="sync">Sync &amp; classify</button>
+        <button id="cancel" style="display:none">Cancel</button>
+        <button id="settingsBtn">Settings</button>
+      </div>
+    </header>
+
+    <div class="progress" id="progress"><i id="bar"></i></div>
+    <div class="msg" id="msg"></div>
+
+    <div class="bar" id="filters"></div>
+    <div class="grid" id="grid"></div>
+    <div class="empty" id="empty" style="display:none">
+      No posts yet. Open Instagram in another tab, then click <b>Sync &amp; classify</b>.
+    </div>
+
+    <div class="drawer" id="drawer" hidden>
+      <div class="drawer-inner">
+        <div class="drawer-head">
+          <h2>Settings</h2>
+          <button id="closeSettings">✕</button>
+        </div>
+        <label>Confidence threshold: <span id="thVal"></span></label>
+        <input type="range" id="threshold" min="0" max="0.6" step="0.01" />
+        <label>Caption weight (vs image): <span id="cwVal"></span></label>
+        <input type="range" id="captionWeight" min="0" max="1" step="0.05" />
+        <label>Categories (JSON: name → list of phrases)</label>
+        <textarea id="categories" rows="14" spellcheck="false"></textarea>
+        <div class="drawer-actions">
+          <button class="primary" id="saveSettings">Save</button>
+          <button id="reclassify">Re-classify all</button>
+          <button id="clearData">Clear data</button>
+        </div>
+        <p class="note" id="settingsMsg"></p>
+      </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
