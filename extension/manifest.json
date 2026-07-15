@@ -14,13 +14,6 @@
     "service_worker": "src/background/service-worker.js",
     "type": "module"
   },
-  "content_scripts": [
-    {
-      "matches": ["https://www.instagram.com/*"],
-      "js": ["src/content/ig-fetch.js"],
-      "run_at": "document_idle"
-    }
-  ],
   "action": {
     "default_title": "IG Saved Sorter",
     "default_popup": "src/popup/popup.html"

@@ -54,8 +54,8 @@ extension/
   manifest.json
   setup.sh                     # vendors transformers.js + WASM (run once)
   src/
-    background/service-worker.js  # orchestrates fetch + classify + thumbnails
-    content/ig-fetch.js           # the ONLY file that calls Instagram's web API
+    background/service-worker.js  # fetch (injected into the page) + classify + thumbnails
+    lib/ig-normalize.js           # parse Instagram's saved-feed responses
     offscreen/offscreen.html + classifier.js   # CLIP (WASM) — image+caption blend
     app/index.html + app.js + app.css          # the gallery + settings
     popup/popup.html + popup.js                 # launcher + progress
@@ -65,8 +65,8 @@ extension/
 ## If sync breaks (endpoint changed)
 
 Instagram's private web endpoints are undocumented and change without notice.
-Everything Instagram-specific lives in **one** file: `src/content/ig-fetch.js`
-(see `FETCH_ENDPOINTS` and `normalize()`). To fix:
+The endpoints live in `src/background/service-worker.js` (the `endpoint*()`
+helpers) and the response parsing in `src/lib/ig-normalize.js`. To fix:
 
 1. Open your Saved page: `https://www.instagram.com/<you>/saved/`
 2. DevTools → **Network** → scroll the page → find the request that returns your

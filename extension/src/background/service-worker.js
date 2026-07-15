@@ -5,6 +5,7 @@
 
 import { MSG, broadcast } from "../lib/messaging.js";
 import { getSettings } from "../lib/settings.js";
+import { normalizePage, normalizeCollections } from "../lib/ig-normalize.js";
 import {
   putPost,
   putThumbnail,
@@ -12,6 +13,9 @@ import {
   clearAll,
   countPosts,
 } from "../lib/db.js";
+
+const IG_APP_ID = "936619743392459";
+const API = "https://www.instagram.com/api/v1";
 
 let syncing = false;
 let cancelRequested = false;
@@ -21,56 +25,85 @@ const PAGE_DELAY_MS = 1000; // polite throttle between pages
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// --- instagram tab + content script -------------------------------------
+// --- instagram tab ------------------------------------------------------
 async function getInstagramTab() {
   const tabs = await chrome.tabs.query({ url: "https://www.instagram.com/*" });
-  let tabId;
   if (tabs.length) {
-    tabId = tabs[0].id;
-  } else {
-    // Open one in the background.
-    const tab = await chrome.tabs.create({
-      url: "https://www.instagram.com/",
-      active: false,
-    });
-    tabId = tab.id;
-    await sleep(1500); // let it start loading before we inject
+    // Prefer a fully-loaded tab.
+    const ready = tabs.find((t) => t.status === "complete") || tabs[0];
+    return ready.id;
   }
-  // Inject the fetch script on demand — the tab may predate the extension load,
-  // in which case the manifest content script was never injected.
-  await ensureContentScript(tabId);
-  await waitForContentScript(tabId);
-  return tabId;
+  const tab = await chrome.tabs.create({ url: "https://www.instagram.com/", active: false });
+  await waitForTabComplete(tab.id);
+  return tab.id;
 }
 
-async function ensureContentScript(tabId) {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["src/content/ig-fetch.js"],
-    });
-  } catch (_) {
-    /* page may still be loading or not injectable; PING loop will catch it */
-  }
-}
-
-async function waitForContentScript(tabId, tries = 20) {
+async function waitForTabComplete(tabId, tries = 40) {
   for (let i = 0; i < tries; i++) {
     try {
-      await chrome.tabs.sendMessage(tabId, { type: "PING" });
-      return;
-    } catch (_) {
-      await sleep(500);
-    }
+      const t = await chrome.tabs.get(tabId);
+      if (t.status === "complete") return;
+    } catch (_) {}
+    await sleep(500);
   }
 }
 
-async function askContentScript(tabId, message) {
-  const res = await chrome.tabs.sendMessage(tabId, message);
-  if (!res || !res.ok) {
-    throw new Error((res && res.error) || "content script call failed");
-  }
-  return res.data;
+// Run a GET fetch INSIDE the instagram.com page (so cookies + origin are the
+// page's), and return the parsed JSON. No content-script messaging — this is
+// injected on demand and returns its result directly, so there's no "receiving
+// end" to miss.
+async function inPageFetch(tabId, url) {
+  const [res] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    args: [url, IG_APP_ID],
+    func: async (u, appId) => {
+      function cookie(name) {
+        const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+        return m ? decodeURIComponent(m[1]) : "";
+      }
+      const r = await fetch(u, {
+        method: "GET",
+        credentials: "include",
+        headers: {
+          "x-ig-app-id": appId,
+          "x-requested-with": "XMLHttpRequest",
+          "x-csrftoken": cookie("csrftoken"),
+        },
+      });
+      if (!r.ok) return { __error: `HTTP ${r.status} ${r.statusText}` };
+      try {
+        return { __json: await r.json() };
+      } catch (e) {
+        return { __error: "non-JSON response (endpoint likely changed)" };
+      }
+    },
+  });
+  const out = res && res.result;
+  if (!out) throw new Error("no response from page (is an instagram.com tab open and logged in?)");
+  if (out.__error) throw new Error(out.__error + " — the saved-posts endpoint may have changed.");
+  return out.__json;
+}
+
+function endpointSavedAll(maxId) {
+  return `${API}/feed/saved/posts/` + (maxId ? `?max_id=${encodeURIComponent(maxId)}` : "");
+}
+function endpointCollection(pk, maxId) {
+  return `${API}/feed/collection/${encodeURIComponent(pk)}/` + (maxId ? `?max_id=${encodeURIComponent(maxId)}` : "");
+}
+function endpointCollectionsList() {
+  return `${API}/collections/list/?collection_types=` + encodeURIComponent('["ALL_MEDIA_AUTO_COLLECTION","MEDIA"]');
+}
+
+async function fetchCollections(tabId) {
+  return normalizeCollections(await inPageFetch(tabId, endpointCollectionsList()));
+}
+async function fetchSavedPage(tabId, collectionPk, maxId) {
+  const url =
+    collectionPk && !String(collectionPk).toUpperCase().includes("ALL_MEDIA")
+      ? endpointCollection(collectionPk, maxId)
+      : endpointSavedAll(maxId);
+  return normalizePage(await inPageFetch(tabId, url));
 }
 
 // --- thumbnails ---------------------------------------------------------
@@ -116,7 +149,7 @@ async function resolveCollectionPk(tabId, collectionName) {
   if (!collectionName || /^all( posts| saved)?$/i.test(collectionName.trim())) {
     return null; // All Posts
   }
-  const cols = await askContentScript(tabId, { type: "FETCH_COLLECTIONS" });
+  const cols = await fetchCollections(tabId);
   const wanted = collectionName.trim().toLowerCase();
   const match = cols.find((c) => (c.name || "").trim().toLowerCase() === wanted);
   if (!match) {
@@ -141,11 +174,7 @@ async function runSync({ collection, limit } = {}) {
 
     do {
       if (cancelRequested) break;
-      const page = await askContentScript(tabId, {
-        type: "FETCH_SAVED_PAGE",
-        collectionPk,
-        maxId,
-      });
+      const page = await fetchSavedPage(tabId, collectionPk, maxId);
 
       for (const item of page.items) {
         if (cancelRequested) break;
@@ -228,7 +257,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       (async () => {
         try {
           const tabId = await getInstagramTab();
-          const cols = await askContentScript(tabId, { type: "FETCH_COLLECTIONS" });
+          const cols = await fetchCollections(tabId);
           sendResponse({ ok: true, collections: cols });
         } catch (e) {
           sendResponse({ ok: false, error: String(e.message || e) });
