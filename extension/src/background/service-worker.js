@@ -8,6 +8,7 @@ import { getSettings } from "../lib/settings.js";
 import { normalizePage, normalizeCollections } from "../lib/ig-normalize.js";
 import {
   putPost,
+  getPost,
   putThumbnail,
   getPostsByStatus,
   clearAll,
@@ -20,8 +21,8 @@ const API = "https://www.instagram.com/api/v1";
 let syncing = false;
 let cancelRequested = false;
 
-const MAX_PAGES = 200; // hard safety cap
-const PAGE_DELAY_MS = 1000; // polite throttle between pages
+const MAX_PAGES = 5000; // very generous safety backstop (~100k+ posts)
+const PAGE_DELAY_MS = 900; // polite throttle between pages
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -134,6 +135,26 @@ async function ensureOffscreen() {
   });
 }
 
+// Send a message to the offscreen document, retrying until its listener is
+// registered (createDocument resolves before the module script finishes
+// loading, so an immediate send can miss the receiver -> "Receiving end does
+// not exist"). This is what makes classification reliably run.
+async function sendToOffscreen(message, tries = 30) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await chrome.runtime.sendMessage(message);
+    } catch (e) {
+      lastErr = e;
+      await sleep(400);
+    }
+  }
+  throw new Error(
+    "Classifier never became ready: " + String((lastErr && lastErr.message) || lastErr) +
+      ". Did you run `bash extension/setup.sh`?"
+  );
+}
+
 async function classifyPending() {
   const pending = await getPostsByStatus("pending");
   if (!pending.length) return;
@@ -141,7 +162,7 @@ async function classifyPending() {
   const ids = pending.map((p) => p.id);
   // Offscreen reads posts+thumbnails+settings from storage itself and writes
   // results back to IndexedDB, broadcasting PROGRESS as it goes.
-  await chrome.runtime.sendMessage({ type: MSG.OFFSCREEN_CLASSIFY, ids });
+  await sendToOffscreen({ type: MSG.OFFSCREEN_CLASSIFY, ids });
 }
 
 // --- sync ---------------------------------------------------------------
@@ -179,6 +200,13 @@ async function runSync({ collection, limit } = {}) {
       for (const item of page.items) {
         if (cancelRequested) break;
         if (limit && fetched >= limit) break;
+        // Incremental: don't refetch/clobber a post we already have (preserves
+        // its classification and any manual override).
+        const existing = await getPost(item.id);
+        if (existing) {
+          fetched++;
+          continue;
+        }
         // Download + downscale the thumbnail; store as a blob (URLs expire).
         if (item.thumbnailUrl) {
           try {

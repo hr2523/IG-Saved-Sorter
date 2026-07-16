@@ -70,25 +70,31 @@ async function renderGrid() {
     const card = document.createElement("div");
     card.className = "card";
     card.innerHTML = `
-      <div class="thumb"><span class="none">no preview</span></div>
+      <div class="thumb" title="${p.permalink ? "Open on Instagram" : ""}"><span class="none">no preview</span></div>
       <div class="meta">
         <div class="cap">${escapeHtml((p.caption || "").slice(0, 120))}</div>
         <div class="conf"><i style="width:${conf}%"></i></div>
         <div class="muted">${conf}% · ${escapeHtml(p.category || UNCATEGORIZED)}${p.manualOverride ? " (manual)" : ""}</div>
         <div class="row">
           <select>${optionHtml(p.category || UNCATEGORIZED)}</select>
-          ${p.permalink ? `<a href="${p.permalink}" target="_blank" rel="noopener">open ↗</a>` : ""}
+          ${p.permalink ? `<a href="${p.permalink}" target="_blank" rel="noopener">open ↗</a>` : `<span class="muted">no link</span>`}
         </div>
       </div>`;
     grid.appendChild(card);
 
-    // thumbnail
+    // clicking the thumbnail opens the original post
+    const thumbEl = card.querySelector(".thumb");
+    if (p.permalink) {
+      thumbEl.style.cursor = "pointer";
+      thumbEl.addEventListener("click", () => window.open(p.permalink, "_blank", "noopener"));
+    }
+
+    // thumbnail image
     getThumbnail(p.id).then((blob) => {
       if (!blob) return;
       const url = URL.createObjectURL(blob);
       objectUrls.push(url);
-      const t = card.querySelector(".thumb");
-      t.innerHTML = `<img loading="lazy" src="${url}" />`;
+      thumbEl.innerHTML = `<img loading="lazy" src="${url}" />`;
     });
 
     // re-categorize
