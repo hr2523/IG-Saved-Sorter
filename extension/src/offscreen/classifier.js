@@ -6,6 +6,7 @@
 import { MSG, broadcast } from "../lib/messaging.js";
 import { getSettings } from "../lib/settings.js";
 import { expandPrompts, UNCATEGORIZED } from "../lib/categories.js";
+import { TAG_VOCAB, extractCaptionKeywords } from "../lib/tags.js";
 import { getPost, putPost, getThumbnail } from "../lib/db.js";
 
 let T = null; // transformers.js module
@@ -13,6 +14,7 @@ let model = null;
 let processor = null;
 let tokenizer = null;
 let labelCache = { key: null, names: [], vectors: [] };
+let tagCache = null; // { names, vectors }
 
 async function loadTransformers() {
   if (T) return T;
@@ -115,10 +117,44 @@ function blend(imgVec, capVec, imageWeight, captionWeight) {
   return l2normalize(out);
 }
 
+// One normalized embedding per tag (cached for the session).
+async function ensureTagEmbeddings() {
+  if (tagCache) return tagCache;
+  const vectors = [];
+  for (const tag of TAG_VOCAB) {
+    const [v] = await encodeTexts(["a photo of " + tag]);
+    vectors.push(v);
+  }
+  tagCache = { names: TAG_VOCAB.slice(), vectors };
+  return tagCache;
+}
+
+// Hybrid keywords: top CLIP visual tags + salient caption words, deduped.
+function buildKeywords(imgVec, tags, caption, maxOut = 6) {
+  const out = [];
+  const seen = new Set();
+  if (imgVec) {
+    const scored = tags.names
+      .map((name, i) => ({ name, s: dot(imgVec, tags.vectors[i]) }))
+      .sort((a, b) => b.s - a.s);
+    for (const { name, s } of scored) {
+      if (s < 0.2) break; // weak match cutoff
+      if (!seen.has(name)) { seen.add(name); out.push(name); }
+      if (out.length >= 4) break;
+    }
+  }
+  for (const w of extractCaptionKeywords(caption, 4)) {
+    if (out.length >= maxOut) break;
+    if (!seen.has(w)) { seen.add(w); out.push(w); }
+  }
+  return out.slice(0, maxOut);
+}
+
 async function classifyIds(ids) {
   const settings = await getSettings();
   await ensureModel(settings.model);
   const labels = await ensureLabelEmbeddings(settings.categories);
+  const tags = await ensureTagEmbeddings();
 
   let done = 0;
   for (const id of ids) {
@@ -153,6 +189,7 @@ async function classifyIds(ids) {
         post.status = "done";
         post.category = UNCATEGORIZED;
         post.confidence = 0;
+        post.keywords = buildKeywords(null, tags, caption);
         await putPost(post);
         done++;
         continue;
@@ -167,6 +204,7 @@ async function classifyIds(ids) {
       post.scores = labels.names.map((n, i) => ({ category: n, p: probs[i] }))
         .sort((a, b) => b.p - a.p)
         .slice(0, 3);
+      post.keywords = buildKeywords(imgVec, tags, caption);
       post.status = "done";
       await putPost(post);
     } catch (e) {

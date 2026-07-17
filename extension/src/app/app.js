@@ -67,26 +67,28 @@ async function renderGrid() {
   grid.innerHTML = "";
   for (const p of items) {
     const conf = Math.round((p.confidence || 0) * 100);
+    const kws = (p.keywords && p.keywords.length ? p.keywords : []).slice(0, 6);
     const card = document.createElement("div");
     card.className = "card";
     card.innerHTML = `
-      <div class="thumb" title="${p.permalink ? "Open on Instagram" : ""}"><span class="none">no preview</span></div>
+      <div class="thumb"><span class="none">no preview</span></div>
       <div class="meta">
-        <div class="cap">${escapeHtml((p.caption || "").slice(0, 120))}</div>
-        <div class="conf"><i style="width:${conf}%"></i></div>
-        <div class="muted">${conf}% · ${escapeHtml(p.category || UNCATEGORIZED)}${p.manualOverride ? " (manual)" : ""}</div>
-        <div class="row">
-          <select>${optionHtml(p.category || UNCATEGORIZED)}</select>
-          ${p.permalink ? `<a href="${p.permalink}" target="_blank" rel="noopener">open ↗</a>` : `<span class="muted">no link</span>`}
+        <div class="cat">${escapeHtml(p.category || UNCATEGORIZED)}${p.manualOverride ? ` <span class="manual">· edited</span>` : ""}</div>
+        <ul class="kw">${kws.map((k) => `<li>${escapeHtml(k)}</li>`).join("") || `<li style="color:var(--faint)">no keywords</li>`}</ul>
+        <div class="foot">
+          <span class="conf"><i style="width:${conf}%"></i></span>
+          ${p.permalink ? `<a class="open" href="${p.permalink}" target="_blank" rel="noopener">open ↗</a>` : ""}
         </div>
+        <select class="recat" title="Re-categorize">${optionHtml(p.category || UNCATEGORIZED)}</select>
       </div>`;
     grid.appendChild(card);
 
     // clicking the thumbnail opens the original post
     const thumbEl = card.querySelector(".thumb");
     if (p.permalink) {
-      thumbEl.style.cursor = "pointer";
       thumbEl.addEventListener("click", () => window.open(p.permalink, "_blank", "noopener"));
+    } else {
+      thumbEl.style.cursor = "default";
     }
 
     // thumbnail image
@@ -196,5 +198,20 @@ $("clearData").onclick = async () => {
   $("drawer").hidden = true;
   load();
 };
+
+// --- theme (auto -> light -> dark) --------------------------------------
+const THEMES = ["auto", "light", "dark"];
+const THEME_ICON = { auto: "◐", light: "☀", dark: "☾" };
+function applyTheme(t) {
+  if (t === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", t);
+  $("themeBtn").textContent = THEME_ICON[t];
+  localStorage.setItem("igss-theme", t);
+}
+$("themeBtn").onclick = () => {
+  const cur = localStorage.getItem("igss-theme") || "auto";
+  applyTheme(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]);
+};
+applyTheme(localStorage.getItem("igss-theme") || "auto");
 
 load();

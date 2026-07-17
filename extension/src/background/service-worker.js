@@ -21,6 +21,12 @@ const API = "https://www.instagram.com/api/v1";
 let syncing = false;
 let cancelRequested = false;
 
+// Buffer of captures relayed from the page interceptor.
+let capture = { template: null, pages: [] };
+function resetCapture() {
+  capture = { template: null, pages: [] };
+}
+
 const MAX_PAGES = 5000; // very generous safety backstop (~100k+ posts)
 const PAGE_DELAY_MS = 900; // polite throttle between pages
 
@@ -270,76 +276,151 @@ function scrapeChunk(scrollsPerChunk, delayMs) {
   });
 }
 
+// Make sure the interceptor (MAIN) + relay (ISOLATED) are present even if the
+// tab predates the extension load (content_scripts wouldn't have run).
+async function injectInterceptor(tabId) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", files: ["src/content/interceptor.js"] });
+  } catch (_) {}
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, world: "ISOLATED", files: ["src/content/relay.js"] });
+  } catch (_) {}
+}
+
+// Nudge the page to make Instagram fire its own saved-feed request.
+async function nudgeScroll(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId }, world: "MAIN",
+      func: () => window.scrollTo(0, document.body.scrollHeight),
+    });
+  } catch (_) {}
+}
+
+async function waitFor(pred, ms) {
+  const start = Date.now();
+  while (Date.now() - start < ms) {
+    if (pred()) return true;
+    await sleep(200);
+  }
+  return pred();
+}
+
+// Replay the captured request with a new pagination cursor, in the page (so
+// cookies + tokens apply). Returns parsed JSON or {__error}.
+async function replayInPage(tabId, template, cursor) {
+  const [res] = await chrome.scripting.executeScript({
+    target: { tabId }, world: "MAIN",
+    args: [template, cursor],
+    func: async (tpl, cur) => {
+      try {
+        let { method = "GET", url, headers = {}, body } = tpl;
+        method = method.toUpperCase();
+        // Drop headers the browser must set itself.
+        const clean = {};
+        for (const k in headers) {
+          if (!/^(cookie|host|content-length|user-agent|referer|origin|accept-encoding)$/i.test(k)) clean[k] = headers[k];
+        }
+        if (method === "GET") {
+          const u = new URL(url);
+          u.searchParams.set("max_id", cur);
+          url = u.toString();
+        } else if (body) {
+          try {
+            const params = new URLSearchParams(body);
+            if (params.has("variables")) {
+              const v = JSON.parse(params.get("variables"));
+              ["after", "max_id", "end_cursor", "cursor"].forEach((k) => { if (k in v) v[k] = cur; });
+              if (!("after" in v) && !("max_id" in v)) v.after = cur;
+              params.set("variables", JSON.stringify(v));
+              body = params.toString();
+            } else if (/max_id=/.test(body)) {
+              body = body.replace(/(max_id=)[^&]*/, "$1" + encodeURIComponent(cur));
+            }
+          } catch (_) {
+            try { const j = JSON.parse(body); if (j.variables) { j.variables.after = cur; body = JSON.stringify(j); } } catch (_) {}
+          }
+        }
+        const r = await fetch(url, { method, headers: clean, body: method === "GET" ? undefined : body, credentials: "include" });
+        if (!r.ok) return { __error: "HTTP " + r.status };
+        return await r.json();
+      } catch (e) { return { __error: String((e && e.message) || e) }; }
+    },
+  });
+  return (res && res.result) || { __error: "no result" };
+}
+
 async function runSync({ limit } = {}) {
   if (syncing) return;
   syncing = true;
   cancelRequested = false;
+  resetCapture();
   try {
     const tabId = await getActiveSavedTab();
-    broadcast({ type: MSG.PROGRESS, phase: "fetch", done: 0, total: null, message: "Reading your Saved page… (it will auto-scroll)" });
+    await injectInterceptor(tabId);
+    broadcast({ type: MSG.PROGRESS, phase: "fetch", done: 0, total: null, message: "Reading your saved posts…" });
 
-    const processed = new Set();
+    const seen = new Set();
     let stored = 0;
-    let stable = 0;
-    let prevSeen = -1;
 
-    for (let round = 0; round < 4000 && !cancelRequested; round++) {
-      const [res] = await chrome.scripting.executeScript({
-        target: { tabId },
-        world: "MAIN",
-        func: scrapeChunk,
-        args: [4, 800],
-      });
-      const items = (res && res.result) || [];
-
-      for (const raw of items) {
-        if (cancelRequested) break;
-        if (limit && stored >= limit) break;
-        if (processed.has(raw.code)) continue;
-        processed.add(raw.code);
-
-        const post = {
-          id: raw.code,
-          code: raw.code,
-          caption: raw.caption || "",
-          thumbnailUrl: raw.thumbnailUrl || null,
-          permalink: `https://www.instagram.com/p/${raw.code}/`,
-          takenAt: null,
-          status: "pending",
-          category: null,
-          confidence: 0,
-          manualOverride: false,
-        };
-
-        const existing = await getPost(post.id);
-        if (existing) continue; // incremental: keep prior classification
-        if (post.thumbnailUrl) {
-          try {
-            const blob = await fetchThumbnailBlob(post.thumbnailUrl);
-            await putThumbnail(post.id, blob);
-          } catch (_) {}
+    // Store a batch of normalized items (dedupe + incremental). Returns #new.
+    async function processItems(items) {
+      let n = 0;
+      for (const it of items) {
+        if (cancelRequested || (limit && stored >= limit)) break;
+        if (!it || !it.id || seen.has(it.id)) continue;
+        seen.add(it.id);
+        if (await getPost(it.id)) continue; // already have it -> keep classification
+        if (it.thumbnailUrl) {
+          try { await putThumbnail(it.id, await fetchThumbnailBlob(it.thumbnailUrl)); } catch (_) {}
         }
-        await putPost(post);
-        stored++;
+        await putPost(it);
+        stored++; n++;
       }
-
-      broadcast({ type: MSG.PROGRESS, phase: "fetch", done: processed.size, total: null, message: `Found ${processed.size} post(s)…` });
-
-      if (limit && stored >= limit) break;
-      // Stop when scrolling stops revealing anything new.
-      if (items.length === prevSeen) {
-        if (++stable >= 3) break;
-      } else {
-        stable = 0;
-      }
-      prevSeen = items.length;
+      broadcast({ type: MSG.PROGRESS, phase: "fetch", done: seen.size, total: null, message: `Found ${seen.size} saved post(s)…` });
+      return n;
     }
 
-    broadcast({ type: MSG.PROGRESS, phase: "classify", done: 0, total: processed.size, message: "Classifying…" });
-    await classifyPending();
+    let lastCursor = null, anyData = false;
+    async function drainCaptured() {
+      let newTotal = 0;
+      while (capture.pages.length) {
+        const page = normalizePage(capture.pages.shift());
+        if (page.items.length) anyData = true;
+        newTotal += await processItems(page.items);
+        if (page.nextMaxId) lastCursor = page.nextMaxId;
+      }
+      return newTotal;
+    }
 
-    const total = await countPosts();
-    broadcast({ type: MSG.DONE, total });
+    // 1) Trigger Instagram's own request, then read what the interceptor caught.
+    await nudgeScroll(tabId);
+    await waitFor(() => capture.template || capture.pages.length, 9000);
+    let hadNew = (await drainCaptured()) > 0;
+
+    // 2) Primary: replay the captured request with cursors (no scrolling).
+    if (capture.template && lastCursor) {
+      let cursor = lastCursor, pages = 0, stale = 0;
+      while (cursor && pages < MAX_PAGES && !cancelRequested && !(limit && stored >= limit)) {
+        const raw = await replayInPage(tabId, capture.template, cursor);
+        if (!raw || raw.__error) break;
+        const page = normalizePage(raw);
+        const n = await processItems(page.items);
+        await drainCaptured();
+        pages++;
+        if (n === 0) { if (++stale >= 2) break; } else stale = 0; // early-exit: nothing new
+        if (!page.moreAvailable && !page.nextMaxId) break;
+        cursor = page.nextMaxId || lastCursor;
+        await sleep(500);
+      }
+    } else if (!anyData) {
+      // 3) Fallbacks: robust scroll (harvesting intercepted responses), then DOM scrape.
+      await scrollInterceptFallback(tabId, processItems, drainCaptured);
+    }
+
+    broadcast({ type: MSG.PROGRESS, phase: "classify", done: 0, total: seen.size, message: "Classifying…" });
+    await classifyPending();
+    broadcast({ type: MSG.DONE, total: await countPosts() });
   } catch (e) {
     broadcast({ type: MSG.ERROR, where: "sync", message: String(e.message || e) });
   } finally {
@@ -347,9 +428,45 @@ async function runSync({ limit } = {}) {
   }
 }
 
+// Fallback: scroll robustly; the interceptor harvests the JSON responses IG
+// makes. If nothing is ever intercepted, fall back to DOM scraping the grid.
+async function scrollInterceptFallback(tabId, processItems, drainCaptured) {
+  let stable = 0, sawData = false;
+  for (let round = 0; round < 3000 && !cancelRequested; round++) {
+    await nudgeScroll(tabId);
+    await sleep(900);
+    const n = await drainCaptured();
+    if (n > 0) { sawData = true; stable = 0; } else if (++stable >= 4) break;
+  }
+  if (sawData) return;
+  // Nothing intercepted at all → DOM scrape the rendered grid.
+  let stable2 = 0, prev = -1;
+  for (let round = 0; round < 3000 && !cancelRequested; round++) {
+    const [res] = await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", func: scrapeChunk, args: [4, 800] });
+    const raw = (res && res.result) || [];
+    const items = raw.map((r) => ({
+      id: r.code, code: r.code, caption: r.caption || "",
+      thumbnailUrl: r.thumbnailUrl || null, permalink: `https://www.instagram.com/p/${r.code}/`,
+      takenAt: null, status: "pending", category: null, confidence: 0, manualOverride: false,
+    }));
+    await processItems(items);
+    if (raw.length === prev) { if (++stable2 >= 3) break; } else stable2 = 0;
+    prev = raw.length;
+  }
+}
+
 // --- message router -----------------------------------------------------
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || !msg.type) return;
+
+  // Captures relayed from the page interceptor (no response needed).
+  if (msg.type === "IG_CAPTURE") {
+    if (msg.kind === "page" && msg.json) {
+      if (msg.template && !capture.template) capture.template = msg.template;
+      capture.pages.push(msg.json);
+    }
+    return; // fire-and-forget
+  }
 
   switch (msg.type) {
     case MSG.START_SYNC:
