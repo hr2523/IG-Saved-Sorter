@@ -16,6 +16,10 @@ function setBusy(busy) {
   progress.style.display = busy ? "block" : "none";
 }
 
+try {
+  $("ver").textContent = "v" + chrome.runtime.getManifest().version;
+} catch (_) {}
+
 async function refreshCount() {
   try {
     const s = await chrome.runtime.sendMessage({ type: MSG.GET_STATUS });
