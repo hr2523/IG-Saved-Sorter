@@ -42,10 +42,18 @@ HuggingFace, then everything runs offline.
 
 ## Use
 
-1. Have a normal **instagram.com** tab open and logged in.
-2. Click the extension icon → optionally type a Collection name (or "List my
-   collections") and a limit → **Sync & classify**.
-3. Click **Open gallery** to review, filter by category, and re-categorize.
+1. On Instagram, go to **Profile → Saved** and open the collection you want (or
+   **All posts**). The page URL should contain `/saved/`.
+2. With that tab active, click the extension → **Sync this page**. It auto-scrolls
+   your Saved grid, reading each post directly from the page (no private API), then
+   classifies them.
+3. Click **Open gallery** to review, filter by category, click a thumbnail to open
+   the original post, and re-categorize anything that's off.
+
+> Reading the rendered page (instead of Instagram's hidden API) is what makes this
+> robust — Instagram serves saved posts via GraphQL now, and the old REST endpoints
+> 404. The tradeoff: captions come from each thumbnail's alt text, so classification
+> leans more on the image than the full caption.
 
 ## Files
 

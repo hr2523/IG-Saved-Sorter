@@ -218,63 +218,124 @@ async function resolveCollectionPk(tabId, collectionName) {
   return match.pk;
 }
 
-async function runSync({ collection, limit } = {}) {
+// The active tab must be showing a Saved page (…/saved/…). We read posts from
+// the rendered grid rather than Instagram's private API (which 404s on GraphQL-
+// only accounts). Returns the tab id.
+async function getActiveSavedTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const url = (tab && tab.url) || "";
+  if (!/^https:\/\/www\.instagram\.com\//.test(url)) {
+    throw new Error("Open instagram.com in the active tab, go to your Saved page, then Sync.");
+  }
+  if (!/\/saved\//.test(url)) {
+    throw new Error(
+      "Open your Saved page first: Profile → Saved → the collection you want " +
+        "(URL should contain /saved/). Then click Sync."
+    );
+  }
+  return tab.id;
+}
+
+// Injected into the page: scroll a few times and return EVERY saved post seen so
+// far (accumulated on window across chunks, since the grid virtualizes and drops
+// off-screen nodes).
+function scrapeChunk(scrollsPerChunk, delayMs) {
+  return new Promise(async (resolve) => {
+    window.__igssSaved = window.__igssSaved || {};
+    const store = window.__igssSaved;
+    function collect() {
+      const anchors = document.querySelectorAll(
+        'a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]'
+      );
+      for (const a of anchors) {
+        const m = (a.getAttribute("href") || "").match(/\/(p|reel|tv)\/([A-Za-z0-9_-]+)/);
+        if (!m) continue;
+        const code = m[2];
+        if (store[code]) continue;
+        const img = a.querySelector("img");
+        store[code] = {
+          code,
+          thumbnailUrl: img ? img.src : null,
+          caption: img ? img.alt || "" : "",
+        };
+      }
+    }
+    collect();
+    for (let i = 0; i < scrollsPerChunk; i++) {
+      window.scrollTo(0, document.body.scrollHeight);
+      await new Promise((r) => setTimeout(r, delayMs));
+      collect();
+    }
+    resolve(Object.values(store));
+  });
+}
+
+async function runSync({ limit } = {}) {
   if (syncing) return;
   syncing = true;
   cancelRequested = false;
-  cachedSavedTemplate = null; // re-probe endpoints each run
   try {
-    const tabId = await getInstagramTab();
-    const collectionPk = await resolveCollectionPk(tabId, collection);
+    const tabId = await getActiveSavedTab();
+    broadcast({ type: MSG.PROGRESS, phase: "fetch", done: 0, total: null, message: "Reading your Saved page… (it will auto-scroll)" });
 
-    let maxId = null;
-    let fetched = 0;
-    let pages = 0;
-    broadcast({ type: MSG.PROGRESS, phase: "fetch", done: 0, total: null, message: "Fetching saved posts…" });
+    const processed = new Set();
+    let stored = 0;
+    let stable = 0;
+    let prevSeen = -1;
 
-    do {
-      if (cancelRequested) break;
-      const page = await fetchSavedPage(tabId, collectionPk, maxId);
+    for (let round = 0; round < 4000 && !cancelRequested; round++) {
+      const [res] = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: scrapeChunk,
+        args: [4, 800],
+      });
+      const items = (res && res.result) || [];
 
-      for (const item of page.items) {
+      for (const raw of items) {
         if (cancelRequested) break;
-        if (limit && fetched >= limit) break;
-        // Incremental: don't refetch/clobber a post we already have (preserves
-        // its classification and any manual override).
-        const existing = await getPost(item.id);
-        if (existing) {
-          fetched++;
-          continue;
-        }
-        // Download + downscale the thumbnail; store as a blob (URLs expire).
-        if (item.thumbnailUrl) {
+        if (limit && stored >= limit) break;
+        if (processed.has(raw.code)) continue;
+        processed.add(raw.code);
+
+        const post = {
+          id: raw.code,
+          code: raw.code,
+          caption: raw.caption || "",
+          thumbnailUrl: raw.thumbnailUrl || null,
+          permalink: `https://www.instagram.com/p/${raw.code}/`,
+          takenAt: null,
+          status: "pending",
+          category: null,
+          confidence: 0,
+          manualOverride: false,
+        };
+
+        const existing = await getPost(post.id);
+        if (existing) continue; // incremental: keep prior classification
+        if (post.thumbnailUrl) {
           try {
-            const blob = await fetchThumbnailBlob(item.thumbnailUrl);
-            await putThumbnail(item.id, blob);
-          } catch (_) {
-            /* keep the post even if the thumbnail failed */
-          }
+            const blob = await fetchThumbnailBlob(post.thumbnailUrl);
+            await putThumbnail(post.id, blob);
+          } catch (_) {}
         }
-        await putPost(item);
-        fetched++;
+        await putPost(post);
+        stored++;
       }
 
-      broadcast({
-        type: MSG.PROGRESS,
-        phase: "fetch",
-        done: fetched,
-        total: null,
-        message: `Fetched ${fetched} post(s)…`,
-      });
+      broadcast({ type: MSG.PROGRESS, phase: "fetch", done: processed.size, total: null, message: `Found ${processed.size} post(s)…` });
 
-      maxId = page.nextMaxId;
-      pages++;
-      if (limit && fetched >= limit) break;
-      if (page.moreAvailable && maxId) await sleep(PAGE_DELAY_MS);
-    } while (maxId && pages < MAX_PAGES && !cancelRequested);
+      if (limit && stored >= limit) break;
+      // Stop when scrolling stops revealing anything new.
+      if (items.length === prevSeen) {
+        if (++stable >= 3) break;
+      } else {
+        stable = 0;
+      }
+      prevSeen = items.length;
+    }
 
-    // Classify everything still pending.
-    broadcast({ type: MSG.PROGRESS, phase: "classify", done: 0, total: fetched, message: "Classifying…" });
+    broadcast({ type: MSG.PROGRESS, phase: "classify", done: 0, total: processed.size, message: "Classifying…" });
     await classifyPending();
 
     const total = await countPosts();
@@ -321,15 +382,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return true;
 
     case MSG.LIST_COLLECTIONS:
-      (async () => {
-        try {
-          const tabId = await getInstagramTab();
-          const cols = await fetchCollections(tabId);
-          sendResponse({ ok: true, collections: cols });
-        } catch (e) {
-          sendResponse({ ok: false, error: String(e.message || e) });
-        }
-      })();
+      // This build reads whatever Saved page you're viewing, so there's no
+      // API collection list. Guide the user to navigate instead.
+      sendResponse({
+        ok: false,
+        error:
+          "This version sorts whatever Saved page you're on. On Instagram open " +
+          "Profile → Saved → the collection (or All posts), then click Sync.",
+      });
       return true;
 
     case MSG.CLEAR_DATA:

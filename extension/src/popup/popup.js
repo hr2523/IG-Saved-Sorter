@@ -28,11 +28,10 @@ $("sync").onclick = async () => {
   setBusy(true);
   setMsg("Starting…");
   bar.style.width = "8%";
-  const collection = $("collection").value.trim() || undefined;
   const limitVal = $("limit").value.trim();
   const limit = limitVal ? parseInt(limitVal, 10) : undefined;
   try {
-    await chrome.runtime.sendMessage({ type: MSG.START_SYNC, collection, limit });
+    await chrome.runtime.sendMessage({ type: MSG.START_SYNC, limit });
   } catch (e) {
     setMsg(String(e.message || e), true);
     setBusy(false);
@@ -42,24 +41,6 @@ $("sync").onclick = async () => {
 $("cancel").onclick = async () => {
   await chrome.runtime.sendMessage({ type: MSG.CANCEL_SYNC });
   setMsg("Cancelling…");
-};
-
-$("loadCols").onclick = async () => {
-  setMsg("Loading collections…");
-  const res = await chrome.runtime.sendMessage({ type: MSG.LIST_COLLECTIONS });
-  if (!res || !res.ok) {
-    setMsg((res && res.error) || "Could not list collections", true);
-    return;
-  }
-  const dl = $("collections");
-  dl.innerHTML = "";
-  for (const c of res.collections) {
-    const o = document.createElement("option");
-    o.value = c.name;
-    o.label = `${c.name} (${c.count})`;
-    dl.appendChild(o);
-  }
-  setMsg(`${res.collections.length} collection(s) — type or pick one above.`);
 };
 
 $("open").onclick = () => {

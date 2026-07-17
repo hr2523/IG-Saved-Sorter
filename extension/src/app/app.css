@@ -12,6 +12,7 @@ header { position: sticky; top: 0; z-index: 5; background: var(--bg);
 h1 { margin: 0; font-size: 18px; }
 .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.hint { color: var(--muted); font-size: 12px; }
 input, button, select, textarea { font: inherit; background: var(--card); color: var(--text);
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; }
 button { cursor: pointer; }

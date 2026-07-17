@@ -23,6 +23,7 @@
       .msg { font-size: 11px; color: var(--muted); min-height: 14px; }
       .msg.err { color: #c0392b; }
       .foot { display:flex; justify-content: space-between; align-items:center; }
+      .steps { font-size: 12px; color: #333; background: #f4f6fb; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; line-height: 1.5; }
     </style>
   </head>
   <body>
@@ -31,13 +32,10 @@
       <div class="sub" id="count">—</div>
     </header>
     <div class="body">
-      <div>
-        <label for="collection">Collection (blank = all saved)</label>
-        <div class="row">
-          <input id="collection" list="collections" placeholder="e.g. Recipes" />
-        </div>
-        <datalist id="collections"></datalist>
-        <button id="loadCols" style="margin-top:6px; width:100%">List my collections</button>
+      <div class="steps">
+        <b>1.</b> On Instagram, open <b>Profile → Saved</b> → the collection you want
+        (or <b>All posts</b>).<br />
+        <b>2.</b> With that tab active, click <b>Sync this page</b> below.
       </div>
       <div class="row">
         <div>
@@ -45,7 +43,7 @@
           <input id="limit" type="number" min="1" placeholder="all" />
         </div>
       </div>
-      <button class="primary" id="sync">Sync &amp; classify</button>
+      <button class="primary" id="sync">Sync this page</button>
       <button id="cancel" style="display:none">Cancel</button>
       <div class="progress" id="progress"><i id="bar"></i></div>
       <div class="msg" id="msg"></div>

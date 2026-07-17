@@ -130,9 +130,8 @@ $("sync").onclick = async () => {
   setBusy(true);
   setMsg("Starting…");
   $("bar").style.width = "8%";
-  const collection = $("collection").value.trim() || undefined;
   const limit = $("limit").value.trim() ? parseInt($("limit").value, 10) : undefined;
-  await chrome.runtime.sendMessage({ type: MSG.START_SYNC, collection, limit });
+  await chrome.runtime.sendMessage({ type: MSG.START_SYNC, limit });
 };
 $("cancel").onclick = () => chrome.runtime.sendMessage({ type: MSG.CANCEL_SYNC });
 
@@ -197,17 +196,5 @@ $("clearData").onclick = async () => {
   $("drawer").hidden = true;
   load();
 };
-
-// preload collection datalist
-chrome.runtime.sendMessage({ type: MSG.LIST_COLLECTIONS }).then((res) => {
-  if (!res || !res.ok) return;
-  const dl = $("collections");
-  for (const c of res.collections) {
-    const o = document.createElement("option");
-    o.value = c.name;
-    o.label = `${c.name} (${c.count})`;
-    dl.appendChild(o);
-  }
-}).catch(() => {});
 
 load();
