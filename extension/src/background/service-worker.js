@@ -86,25 +86,63 @@ async function inPageFetch(tabId, url) {
   return out.__json;
 }
 
-function endpointSavedAll(maxId) {
-  return `${API}/feed/saved/posts/` + (maxId ? `?max_id=${encodeURIComponent(maxId)}` : "");
+const qp = (maxId) => (maxId ? `?max_id=${encodeURIComponent(maxId)}` : "");
+
+// Candidate endpoint builders (Instagram's private web API path has changed over
+// time and differs by account). We try each until one doesn't 404, then cache
+// the winner for the rest of the run.
+function savedAllCandidates(maxId) {
+  return [
+    `${API}/feed/saved/posts/${qp(maxId)}`,
+    `${API}/feed/saved/${qp(maxId)}`,
+    `${API}/feed/collection/ALL_MEDIA_AUTO_COLLECTION/posts/${qp(maxId)}`,
+    `${API}/feed/collection/ALL_MEDIA_AUTO_COLLECTION/${qp(maxId)}`,
+  ];
 }
-function endpointCollection(pk, maxId) {
-  return `${API}/feed/collection/${encodeURIComponent(pk)}/` + (maxId ? `?max_id=${encodeURIComponent(maxId)}` : "");
+function collectionCandidates(pk, maxId) {
+  return [
+    `${API}/feed/collection/${encodeURIComponent(pk)}/posts/${qp(maxId)}`,
+    `${API}/feed/collection/${encodeURIComponent(pk)}/${qp(maxId)}`,
+  ];
 }
 function endpointCollectionsList() {
   return `${API}/collections/list/?collection_types=` + encodeURIComponent('["ALL_MEDIA_AUTO_COLLECTION","MEDIA"]');
 }
 
+let cachedSavedTemplate = null; // remembers the working URL builder across pages
+
 async function fetchCollections(tabId) {
   return normalizeCollections(await inPageFetch(tabId, endpointCollectionsList()));
 }
+
 async function fetchSavedPage(tabId, collectionPk, maxId) {
-  const url =
-    collectionPk && !String(collectionPk).toUpperCase().includes("ALL_MEDIA")
-      ? endpointCollection(collectionPk, maxId)
-      : endpointSavedAll(maxId);
-  return normalizePage(await inPageFetch(tabId, url));
+  const isCollection = collectionPk && !String(collectionPk).toUpperCase().includes("ALL_MEDIA");
+  // If we already found a working endpoint this run, reuse it.
+  if (cachedSavedTemplate) {
+    return normalizePage(await inPageFetch(tabId, cachedSavedTemplate(maxId)));
+  }
+  const candidates = isCollection
+    ? collectionCandidates(collectionPk, maxId)
+    : savedAllCandidates(maxId);
+  let lastErr;
+  for (let i = 0; i < candidates.length; i++) {
+    try {
+      const json = await inPageFetch(tabId, candidates[i]);
+      // Remember which template worked (rebuild with the same index).
+      cachedSavedTemplate = (m) =>
+        (isCollection ? collectionCandidates(collectionPk, m) : savedAllCandidates(m))[i];
+      return normalizePage(json);
+    } catch (e) {
+      lastErr = e;
+      if (/HTTP 404/.test(String(e.message))) continue; // try next variant
+      throw e; // 403/other -> real problem, surface it
+    }
+  }
+  throw new Error(
+    "All known saved-posts endpoints returned 404. Instagram changed the API — " +
+      "please capture the real request (DevTools → Network → Copy as cURL). Last: " +
+      String(lastErr && lastErr.message)
+  );
 }
 
 // --- thumbnails ---------------------------------------------------------
@@ -184,6 +222,7 @@ async function runSync({ collection, limit } = {}) {
   if (syncing) return;
   syncing = true;
   cancelRequested = false;
+  cachedSavedTemplate = null; // re-probe endpoints each run
   try {
     const tabId = await getInstagramTab();
     const collectionPk = await resolveCollectionPk(tabId, collection);
