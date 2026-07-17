@@ -4,26 +4,46 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
-      :root { --accent:#6ea8fe; --line:#e3e6ee; --muted:#6b7280; }
-      body { width: 320px; margin: 0; font: 13px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #1a1d24; }
-      header { padding: 12px 14px; border-bottom: 1px solid var(--line); }
-      h1 { margin: 0; font-size: 15px; }
-      .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
-      .body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
-      label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 3px; }
-      input, button, select { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; box-sizing: border-box; }
-      input, select { width: 100%; }
-      button { cursor: pointer; background: #f7f8fb; }
-      button.primary { background: var(--accent); color: #06122b; border-color: var(--accent); font-weight: 600; }
-      button:disabled { opacity: .55; cursor: default; }
-      .row { display: flex; gap: 8px; }
-      .row > * { flex: 1; }
-      .progress { height: 6px; background: #eef1f6; border-radius: 4px; overflow: hidden; display: none; }
+      :root {
+        --bg:#fafafa; --surface:#fff; --text:#0e0e0f; --muted:#86868b; --faint:#b5b5ba;
+        --line:rgba(0,0,0,.09); --line-strong:rgba(0,0,0,.16); --accent:#ff2d2d;
+        --font-sans:"Helvetica Neue", Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        --font-mono:"SF Mono", ui-monospace, "Space Mono", Menlo, monospace;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root { --bg:#0b0b0c; --surface:#141416; --text:#f4f4f5; --muted:#8a8a90; --faint:#55555b;
+          --line:rgba(255,255,255,.10); --line-strong:rgba(255,255,255,.18); }
+      }
+      * { box-sizing: border-box; }
+      body { width: 328px; margin: 0; background: var(--bg); color: var(--text);
+        font-family: var(--font-sans); font-size: 13px; line-height: 1.45; letter-spacing: -0.01em;
+        -webkit-font-smoothing: antialiased; }
+      header { padding: 15px 16px 13px; border-bottom: 1px solid var(--line); }
+      h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .02em; }
+      #ver { font-size: 10px; color: var(--muted); font-weight: 400; font-family: var(--font-mono); }
+      .sub { color: var(--muted); font-size: 10.5px; font-family: var(--font-mono); margin-top: 4px; }
+      .body { padding: 14px 16px; display: flex; flex-direction: column; gap: 11px; }
+      label { font-size: 10px; color: var(--muted); font-family: var(--font-mono); text-transform: uppercase;
+        letter-spacing: .05em; display: block; margin-bottom: 4px; }
+      input, button, select { font-family: var(--font-sans); font-size: 13px; color: var(--text);
+        background: var(--surface); border: 1px solid var(--line-strong); border-radius: 9px;
+        padding: 8px 10px; box-sizing: border-box; transition: border-color .15s; }
+      input { width: 100%; }
+      input:focus { outline: none; border-color: var(--text); }
+      button { cursor: pointer; }
+      button:hover { border-color: var(--text); }
+      button.primary { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 500; }
+      button.primary:hover { opacity: .85; }
+      button:disabled { opacity: .45; cursor: default; }
+      .progress { height: 2px; background: var(--line); border-radius: 2px; overflow: hidden; display: none; }
       .progress > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
-      .msg { font-size: 11px; color: var(--muted); min-height: 14px; }
-      .msg.err { color: #c0392b; }
-      .foot { display:flex; justify-content: space-between; align-items:center; }
-      .steps { font-size: 12px; color: #333; background: #f4f6fb; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; line-height: 1.5; }
+      .msg { font-size: 11px; color: var(--muted); font-family: var(--font-mono); min-height: 14px; }
+      .msg.err { color: var(--accent); }
+      .foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+      .foot button { flex: 1; }
+      .steps { font-size: 12px; color: var(--muted); background: var(--surface); border: 1px solid var(--line);
+        border-radius: 9px; padding: 10px 11px; line-height: 1.55; }
+      .steps b { color: var(--text); font-weight: 600; }
     </style>
   </head>
   <body>

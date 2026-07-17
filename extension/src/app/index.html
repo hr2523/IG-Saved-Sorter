@@ -37,6 +37,15 @@
           <h2>Settings</h2>
           <button id="closeSettings">✕</button>
         </div>
+        <div class="section-label">Layout</div>
+        <label>Corner radius: <span id="crVal"></span>px</label>
+        <input type="range" id="cardRadius" min="0" max="24" step="1" />
+        <label>Card size: <span id="cmVal"></span>px</label>
+        <input type="range" id="cardMinWidth" min="150" max="340" step="10" />
+        <label>Gap: <span id="ggVal"></span>px</label>
+        <input type="range" id="gridGap" min="8" max="44" step="2" />
+
+        <div class="section-label">Classification</div>
         <label>Confidence threshold: <span id="thVal"></span></label>
         <input type="range" id="threshold" min="0" max="0.6" step="0.01" />
         <label>Caption weight (vs image): <span id="cwVal"></span></label>

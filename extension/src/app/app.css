@@ -13,6 +13,10 @@
   --accent: #ff2d2d;
   --font-sans: "Helvetica Neue", Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
   --font-mono: "SF Mono", ui-monospace, "Space Mono", Menlo, monospace;
+  /* gallery layout — overridden from Settings at runtime */
+  --card-radius: 6px;
+  --card-min: 210px;
+  --grid-gap: 22px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -83,12 +87,12 @@ button:disabled { opacity: .45; cursor: default; }
 
 /* grid */
 .grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-  gap: 26px 20px; padding: 12px 28px 60px; max-width: 1500px; margin: 0 auto;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card-min), 1fr));
+  gap: calc(var(--grid-gap) + 4px) var(--grid-gap); padding: 12px 28px 60px; max-width: 1500px; margin: 0 auto;
 }
 .card { display: flex; flex-direction: column; gap: 11px; }
 .thumb {
-  aspect-ratio: 1 / 1; border-radius: 14px; overflow: hidden; background: var(--surface);
+  aspect-ratio: 1 / 1; border-radius: var(--card-radius); overflow: hidden; background: var(--surface);
   border: 1px solid var(--line); position: relative; cursor: pointer;
   transition: transform .18s ease, border-color .18s ease;
 }
@@ -133,3 +137,4 @@ a.open:hover { color: var(--text); }
 .drawer-inner textarea { width: 100%; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; }
 .drawer-actions { display: flex; gap: 8px; margin-top: 12px; }
 .note { color: var(--muted); font-size: 12px; }
+.section-label { font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--text); margin-top: 14px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }

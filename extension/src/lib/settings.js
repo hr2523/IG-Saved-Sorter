@@ -11,6 +11,10 @@ export const DEFAULT_SETTINGS = {
   imageWeight: 0.45,
   captionWeight: 0.55, // captions are often the decisive signal
   model: "Xenova/clip-vit-base-patch32",
+  // Gallery layout (user-customizable, pure CSS — no re-classify needed)
+  cardRadius: 6, // px corner radius on image tiles
+  cardMinWidth: 210, // px min column width -> density
+  gridGap: 22, // px gap between cards
 };
 
 export async function getSettings() {

@@ -19,8 +19,16 @@ function counts(posts) {
   return c;
 }
 
+function applyLayout(s) {
+  const r = document.documentElement.style;
+  r.setProperty("--card-radius", (s.cardRadius ?? 6) + "px");
+  r.setProperty("--card-min", (s.cardMinWidth ?? 210) + "px");
+  r.setProperty("--grid-gap", (s.gridGap ?? 22) + "px");
+}
+
 async function load() {
   STATE.settings = await getSettings();
+  applyLayout(STATE.settings);
   STATE.posts = await getAllPosts();
   $("summary").textContent =
     `${STATE.posts.length} post(s) across ${Object.keys(counts(STATE.posts)).length} categories`;
@@ -159,6 +167,9 @@ $("closeSettings").onclick = () => ($("drawer").hidden = true);
 
 async function openSettings() {
   const s = STATE.settings || (await getSettings());
+  $("cardRadius").value = s.cardRadius; $("crVal").textContent = s.cardRadius;
+  $("cardMinWidth").value = s.cardMinWidth; $("cmVal").textContent = s.cardMinWidth;
+  $("gridGap").value = s.gridGap; $("ggVal").textContent = s.gridGap;
   $("threshold").value = s.threshold;
   $("thVal").textContent = s.threshold;
   $("captionWeight").value = s.captionWeight;
@@ -168,6 +179,17 @@ async function openSettings() {
 }
 $("threshold").oninput = (e) => ($("thVal").textContent = e.target.value);
 $("captionWeight").oninput = (e) => ($("cwVal").textContent = e.target.value);
+// Layout sliders preview live on the grid behind the drawer.
+function previewLayout() {
+  applyLayout({
+    cardRadius: +$("cardRadius").value,
+    cardMinWidth: +$("cardMinWidth").value,
+    gridGap: +$("gridGap").value,
+  });
+}
+$("cardRadius").oninput = (e) => { $("crVal").textContent = e.target.value; previewLayout(); };
+$("cardMinWidth").oninput = (e) => { $("cmVal").textContent = e.target.value; previewLayout(); };
+$("gridGap").oninput = (e) => { $("ggVal").textContent = e.target.value; previewLayout(); };
 
 $("saveSettings").onclick = async () => {
   let categories;
@@ -182,9 +204,13 @@ $("saveSettings").onclick = async () => {
     threshold: parseFloat($("threshold").value),
     captionWeight,
     imageWeight: 1 - captionWeight,
+    cardRadius: parseInt($("cardRadius").value, 10),
+    cardMinWidth: parseInt($("cardMinWidth").value, 10),
+    gridGap: parseInt($("gridGap").value, 10),
     categories,
   });
-  $("settingsMsg").textContent = "Saved. Use “Re-classify all” to apply to existing posts.";
+  applyLayout(STATE.settings);
+  $("settingsMsg").textContent = "Saved. (Layout applies instantly; category/threshold changes need “Re-classify all”.)";
 };
 
 $("reclassify").onclick = async () => {
