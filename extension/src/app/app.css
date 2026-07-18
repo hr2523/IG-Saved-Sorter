@@ -67,6 +67,7 @@ button.primary { background: var(--text); color: var(--bg); border-color: var(--
 button.primary:hover { opacity: .85; }
 button:disabled { opacity: .45; cursor: default; }
 #limit { width: 82px; }
+#search { min-width: 170px; }
 .icon-btn { width: 34px; height: 34px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 
 /* progress + messages */
@@ -112,12 +113,19 @@ button:disabled { opacity: .45; cursor: default; }
 .foot { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; }
 .conf { flex: 1; height: 2px; background: var(--line); border-radius: 2px; overflow: hidden; margin-right: 10px; }
 .conf > i { display: block; height: 100%; background: var(--faint); }
-.recat {
+/* category chips (display) + multi-label editor */
+.cat { flex-wrap: wrap; }
+.catchip { border: 1px solid var(--line-strong); border-radius: 999px; padding: 1px 7px; font-size: 9.5px; letter-spacing: .06em; color: var(--muted); }
+.catedit { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 2px; }
+.catchip.edit { text-transform: none; font-family: var(--font-mono); }
+.catchip.edit b { cursor: pointer; color: var(--faint); font-weight: 700; }
+.catchip.edit b:hover { color: var(--accent); }
+.addcat {
   font-family: var(--font-mono); font-size: 10px; color: var(--muted);
   border: none; background: transparent; padding: 2px 4px; border-radius: 6px; cursor: pointer;
   max-width: 120px;
 }
-.recat:hover { color: var(--text); }
+.addcat:hover { color: var(--text); }
 a.open { font-family: var(--font-mono); font-size: 10px; color: var(--muted); text-decoration: none; }
 a.open:hover { color: var(--text); }
 

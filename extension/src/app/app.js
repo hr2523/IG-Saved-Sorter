@@ -1,13 +1,18 @@
 import { MSG } from "../lib/messaging.js";
 import { getSettings, saveSettings } from "../lib/settings.js";
-import { UNCATEGORIZED } from "../lib/categories.js";
+import { UNCATEGORIZED, cloneCategories, TAXONOMY_VERSION } from "../lib/categories.js";
 import { getAllPosts, getThumbnail, putPost, clearAll } from "../lib/db.js";
 import { getLogs, clearLogs } from "../lib/log.js";
 
 const $ = (id) => document.getElementById(id);
 
-let STATE = { posts: [], filter: "*", settings: null };
+let STATE = { posts: [], filter: "*", search: "", settings: null };
 let objectUrls = [];
+
+// Multi-label read with legacy fallback: older records have only `category`.
+function postCategories(p) {
+  return (p.categories && p.categories.length) ? p.categories : [p.category || UNCATEGORIZED];
+}
 
 function releaseUrls() {
   for (const u of objectUrls) URL.revokeObjectURL(u);
@@ -16,7 +21,7 @@ function releaseUrls() {
 
 function counts(posts) {
   const c = {};
-  for (const p of posts) c[p.category || UNCATEGORIZED] = (c[p.category || UNCATEGORIZED] || 0) + 1;
+  for (const p of posts) for (const cat of postCategories(p)) c[cat] = (c[cat] || 0) + 1;
   return c;
 }
 
@@ -61,34 +66,61 @@ function renderFilters() {
   });
 }
 
-function optionHtml(selected) {
-  return categoryNames()
-    .map((n) => `<option ${n === selected ? "selected" : ""}>${n}</option>`)
-    .join("");
+function matchesSearch(p) {
+  const q = STATE.search;
+  if (!q) return true;
+  if (p.keywords && p.keywords.some((k) => k.toLowerCase().includes(q))) return true;
+  if ((p.caption || "").toLowerCase().includes(q)) return true;
+  return postCategories(p).some((c) => c.toLowerCase().includes(q));
+}
+
+// Apply a manual multi-label edit and persist it (marks the post as overridden,
+// so a later Re-classify all leaves it alone).
+function setCategories(p, cats) {
+  p.categories = cats.length ? cats : [UNCATEGORIZED];
+  p.category = p.categories[0];
+  p.manualOverride = true;
+  p.confidence = p.confidence || 1;
+  return putPost(p).then(() => { renderFilters(); renderGrid(); });
 }
 
 async function renderGrid() {
   releaseUrls();
   const grid = $("grid");
-  const items = STATE.posts.filter((p) => STATE.filter === "*" || (p.category || UNCATEGORIZED) === STATE.filter);
+  const items = STATE.posts.filter(
+    (p) => (STATE.filter === "*" || postCategories(p).includes(STATE.filter)) && matchesSearch(p)
+  );
   $("empty").style.display = STATE.posts.length ? "none" : "block";
 
   grid.innerHTML = "";
   for (const p of items) {
     const conf = Math.round((p.confidence || 0) * 100);
     const kws = (p.keywords && p.keywords.length ? p.keywords : []).slice(0, 6);
+    const cats = postCategories(p);
+    const catInner = p.status === "error"
+      ? `<span class="manual" title="${escapeHtml(p.error || "classification error")}">⚠ error</span>`
+      : p.status === "needs_thumb"
+      ? `<span class="manual">⋯ no thumbnail</span>`
+      : cats.map((c) => `<span class="catchip">${escapeHtml(c)}</span>`).join("");
+    const addOptions = categoryNames()
+      .filter((n) => !cats.includes(n))
+      .map((n) => `<option>${escapeHtml(n)}</option>`)
+      .join("");
     const card = document.createElement("div");
     card.className = "card";
     card.innerHTML = `
       <div class="thumb"><span class="none">no preview</span></div>
       <div class="meta">
-        <div class="cat">${p.status === "error" ? `<span class="manual" title="${escapeHtml(p.error || "classification error")}">⚠ error</span>` : p.status === "needs_thumb" ? `<span class="manual">⋯ no thumbnail</span>` : escapeHtml(p.category || UNCATEGORIZED)}${p.manualOverride ? ` <span class="manual">· edited</span>` : ""}</div>
+        <div class="cat">${catInner}${p.manualOverride ? ` <span class="manual">· edited</span>` : ""}</div>
         <ul class="kw">${kws.map((k) => `<li>${escapeHtml(k)}</li>`).join("") || `<li style="color:var(--faint)">no keywords</li>`}</ul>
         <div class="foot">
           <span class="conf"><i style="width:${conf}%"></i></span>
           ${p.permalink ? `<a class="open" href="${p.permalink}" target="_blank" rel="noopener">open ↗</a>` : ""}
         </div>
-        <select class="recat" title="Re-categorize">${optionHtml(p.category || UNCATEGORIZED)}</select>
+        <div class="catedit">
+          ${cats.map((c) => `<span class="catchip edit" data-c="${encodeURIComponent(c)}">${escapeHtml(c)} <b>×</b></span>`).join("")}
+          <select class="addcat" title="Add category"><option value="">+ add…</option>${addOptions}</select>
+        </div>
       </div>`;
     grid.appendChild(card);
 
@@ -108,15 +140,15 @@ async function renderGrid() {
       thumbEl.innerHTML = `<img loading="lazy" src="${url}" />`;
     });
 
-    // re-categorize
-    const sel = card.querySelector("select");
-    sel.onchange = async () => {
-      p.category = sel.value;
-      p.manualOverride = true;
-      p.confidence = p.confidence || 1;
-      await putPost(p);
-      renderFilters();
-      renderGrid();
+    // multi-label re-categorize: remove a chip, or add a category
+    card.querySelectorAll(".catchip.edit b").forEach((x) => {
+      x.parentElement.onclick = () => {
+        const c = decodeURIComponent(x.parentElement.dataset.c);
+        setCategories(p, postCategories(p).filter((k) => k !== c));
+      };
+    });
+    card.querySelector(".addcat").onchange = (e) => {
+      if (e.target.value) setCategories(p, [...postCategories(p), e.target.value]);
     };
   }
 }
@@ -145,6 +177,14 @@ $("sync").onclick = async () => {
   await chrome.runtime.sendMessage({ type: MSG.START_SYNC, limit });
 };
 $("cancel").onclick = () => chrome.runtime.sendMessage({ type: MSG.CANCEL_SYNC });
+
+// keyword search over the sorter's tags (+ caption + category names); client-side,
+// wired once so it survives the ~1.5s load() refreshes during a sync.
+$("search").oninput = (e) => {
+  STATE.search = e.target.value.trim().toLowerCase();
+  renderFilters();
+  renderGrid();
+};
 
 let lastRefresh = 0;
 chrome.runtime.onMessage.addListener((m) => {
@@ -241,6 +281,12 @@ $("saveSettings").onclick = async () => {
   });
   applyLayout(STATE.settings);
   $("settingsMsg").textContent = "Saved. (Layout applies instantly; category/threshold changes need “Re-classify all”.)";
+};
+
+$("resetCats").onclick = async () => {
+  STATE.settings = await saveSettings({ categories: cloneCategories(), taxonomyVersion: TAXONOMY_VERSION });
+  $("categories").value = JSON.stringify(STATE.settings.categories, null, 2);
+  $("settingsMsg").textContent = "Categories reset to defaults. Click “Re-classify all” to apply.";
 };
 
 $("reclassify").onclick = async () => {

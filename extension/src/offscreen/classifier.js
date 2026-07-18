@@ -12,7 +12,7 @@
 import { MSG, broadcast } from "../lib/messaging.js";
 import { DEFAULT_SETTINGS } from "../lib/settings.js";
 import { addLog } from "../lib/log.js";
-import { UNCATEGORIZED, expandPrompts } from "../lib/categories.js";
+import { UNCATEGORIZED, expandPrompts, detectIntentCategories } from "../lib/categories.js";
 import { TAG_VOCAB, extractCaptionKeywords } from "../lib/tags.js";
 import { getPost, putPost, getThumbnail } from "../lib/db.js";
 
@@ -67,6 +67,37 @@ function mergeKeywords(tags, caption, max = 6) {
   for (const t of tags) { const k = t.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(t); } if (out.length >= 4) break; }
   for (const w of extractCaptionKeywords(caption, 3)) { if (out.length >= max) break; if (!seen.has(w)) { seen.add(w); out.push(w); } }
   return out.slice(0, max);
+}
+
+// Build post.categories from RAW blended cosine — NOT softmax. TEMP=100 makes the
+// softmax winner-take-all (sums to 1), so a genuine second class almost never
+// clears a probability threshold; the raw cosine keeps runners-up comparable.
+// Engine-agnostic: rawScores is parallel to catNames (blended cosine for embed,
+// aggregated catScore for pipeline). Caption-driven intent labels (Tutorials,
+// Reels) are appended INDEPENDENTLY of scoring — that's what makes a cooking
+// tutorial land in both "Food & Cooking" and "Tutorials".
+function assembleCategories({ catNames, rawScores, primaryIdx, primaryIsUncat, caption, settings }) {
+  const intent = detectIntentCategories(caption, catNames);
+  const cap = settings.maxLabels ?? 3;
+  if (primaryIsUncat) {
+    // an intent match can still rescue an otherwise-Uncategorized post
+    return (intent.length ? intent : [UNCATEGORIZED]).slice(0, cap);
+  }
+  const primary = catNames[primaryIdx];
+  const out = [primary];
+  if (settings.multiLabel !== false) {
+    const top = rawScores[primaryIdx];
+    const margin = settings.secondaryMargin ?? 0.9;
+    const secondaries = catNames
+      .map((c, i) => ({ c, s: rawScores[i] }))
+      .filter((x) => x.c !== primary && x.c !== UNCATEGORIZED && x.s >= margin * top)
+      .sort((a, b) => b.s - a.s)
+      .slice(0, cap - 1)
+      .map((x) => x.c);
+    out.push(...secondaries);
+  }
+  for (const c of intent) if (!out.includes(c)) out.push(c);
+  return out.slice(0, cap);
 }
 
 // --- embed engine -------------------------------------------------------
@@ -195,6 +226,11 @@ async function classifyEmbed(post, caption, blob, settings) {
   post.confidence = probs[best];
   post.category = probs[best] >= settings.threshold ? catNames[best] : UNCATEGORIZED;
   post.scores = catNames.map((c, i) => ({ category: c, p: probs[i] })).sort((a, b) => b.p - a.p).slice(0, 3);
+  post.categories = assembleCategories({
+    catNames, rawScores: scores, primaryIdx: best,
+    primaryIsUncat: probs[best] < settings.threshold, caption, settings,
+  });
+  post.category = post.categories[0];
 
   const topTags = tagEmb
     .map((te, i) => ({ t: TAG_VOCAB[i], s: dot(imgVec, te) }))
@@ -234,6 +270,11 @@ async function classifyPipeline(post, caption, blob, settings) {
   post.confidence = bestS;
   post.category = bestS >= settings.threshold ? best : UNCATEGORIZED;
   post.scores = catNames.map((c) => ({ category: c, p: (catScore[c] || 0) / sum })).sort((a, b) => b.p - a.p).slice(0, 3);
+  post.categories = assembleCategories({
+    catNames, rawScores: catNames.map((c) => catScore[c] || 0), primaryIdx: catNames.indexOf(best),
+    primaryIsUncat: bestS < settings.threshold, caption, settings,
+  });
+  post.category = post.categories[0];
   // tags: renormalize across tags + floor
   const tagSum = TAG_VOCAB.reduce((a, t) => a + (score[t] || 0), 0) || 1;
   const topTags = TAG_VOCAB.map((t) => ({ t, s: (score[t] || 0) / tagSum }))
@@ -270,7 +311,12 @@ async function classifyIds(ids, settingsIn) {
 
       if (!blob) {
         if (post.thumbnailUrl) { post.status = "needs_thumb"; }
-        else { post.category = UNCATEGORIZED; post.confidence = 0; post.keywords = mergeKeywords([], caption); post.status = "done"; }
+        else {
+          const intent = detectIntentCategories(caption, Object.keys(settings.categories));
+          post.categories = intent.length ? intent : [UNCATEGORIZED];
+          post.category = post.categories[0];
+          post.confidence = 0; post.keywords = mergeKeywords([], caption); post.status = "done";
+        }
         await putPost(post);
         done++;
         continue;

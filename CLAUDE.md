@@ -10,7 +10,7 @@ with CLIP. Two deliverables live in this repo:
   user's saved posts *in their logged-in browser* (no login/2FA), classifies in-browser
   with transformers.js CLIP, and shows a gallery. **All recent work is here.**
 
-Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.8.5**
+Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.9.0**
 (see `extension/manifest.json`). GitHub repo scope: `hr2523/ig-saved-sorter`.
 
 ---
@@ -42,13 +42,21 @@ gallery. Everything is local (IndexedDB); the IG account is never modified.
   - **pipeline** (fallback): `pipeline('zero-shot-image-classification', ...)` fed the real
     phrases (not display names), phrase→category max-aggregation. Image-only.
   - Classify requests are **serialized** (one inference at a time on the shared model).
-- **`lib/{categories,tags,settings,db,log,messaging}.js`**: taxonomy (18 cats, each with
-  descriptive phrases + `expandPrompts`), ~110-tag vocab + caption keyword extractor,
-  settings (chrome.storage), IndexedDB wrapper (posts + thumbnails), log ring-buffer
-  (its own IndexedDB — works in every context), message constants + `broadcast` (also
-  mirrors errors/progress into the log).
-- **`app/`**: gallery tab (grid grouped by category, keyword bullets, re-categorize,
-  Settings drawer with layout sliders + **Logs panel + Copy logs**, light/dark).
+- **`lib/{categories,tags,settings,db,log,messaging}.js`**: taxonomy (23 cats, each with
+  descriptive phrases + `expandPrompts`; `TAXONOMY_VERSION` + `cloneCategories` for the
+  settings migration; `INTENT_DETECTORS`/`detectIntentCategories` — caption-regex labels like
+  Tutorials/Reels that CLIP can't see in pixels), ~140-tag vocab + caption keyword extractor,
+  settings (chrome.storage; `getSettings` runs a version-gated taxonomy refresh + carries
+  `multiLabel`/`secondaryMargin`/`maxLabels`), IndexedDB wrapper (posts + thumbnails), log
+  ring-buffer (its own IndexedDB — works in every context), message constants + `broadcast`.
+- **Multi-label:** a post carries `post.categories` (string[]) built by `assembleCategories`
+  in the classifier — primary via argmax+threshold, secondaries via **raw blended cosine**
+  (NOT the peaky softmax) within `secondaryMargin` of the top, plus caption **intent** labels.
+  `post.category` = `categories[0]` (kept for backward-compat + the DB `category` index).
+- **`app/`**: gallery tab (grid filtered by category chips **+ a keyword/caption/category
+  search box**, multi-label category chips per card + a removable-chip/add-dropdown editor,
+  Settings drawer with layout sliders + **Reset categories** + **Logs panel + Copy logs**,
+  light/dark).
 - **`popup/`**: launcher (Sync this page, limit, progress, open gallery). Shows version.
 
 Post `status` lifecycle: `pending` → (`needs_thumb` if thumbnail failed / `error` if
@@ -143,6 +151,16 @@ Done recently (from an adversarial code review — 21 verified findings):
   `split:<configured>` → `merged:patch16`, self-tested, else pipeline. Confirm from the Logs
   panel (`embed self-test OK via merged:…`) + per-post timing (expect well under the pipeline's
   ~3 s/post).
+- **v0.9.0** — **multi-label categorization + keyword search.** Added 5 categories (Motion
+  Graphics & Animation, 3D/CGI Render, Video/Film/Reels, UI/UX & Web/Product Design, Tutorials)
+  and tightened over-broad absorber phrases (Photography/People/Business/Tech/Quotes/Memes).
+  Posts now carry `post.categories[]` via `assembleCategories` (secondaries from raw cosine, not
+  the peaky softmax; caption **intent** detector adds Tutorials/Reels regardless of the image —
+  so a cooking tutorial = Food **and** Tutorials). Gallery: keyword/caption/category search box +
+  per-card multi-label chip editor. Settings: `TAXONOMY_VERSION`-gated refresh in `getSettings`
+  (existing installs' frozen `categories` get replaced once, threshold/weights preserved) +
+  **Reset categories** button. Existing posts need a **Re-classify all** to gain `categories`
+  and be re-scored; legacy single-`category` records render via a `postCategories()` fallback.
 
 ### Not yet done (remaining verified review findings, lower priority)
 - Gallery re-reads all posts + re-decodes all thumbnails every 1.5s during classify
@@ -153,8 +171,10 @@ Done recently (from an adversarial code review — 21 verified findings):
   remove (nothing web-facing loads them).
 - Dead endpoint-guessing code in the service worker (`inPageFetch`, candidate builders,
   `resolveCollectionPk`, unused `normalizeCollections`) — delete or wire in.
-- Categorization could be multi-label (IG posts span topics) and/or a stronger model
-  (SigLIP) as an opt-in.
+- Multi-label shipped in v0.9.0. Remaining categorization ideas: a stronger model (SigLIP)
+  as an opt-in; expose `secondaryMargin`/`maxLabels` as Settings sliders; tune the intent
+  regex if it over-fires; optional absolute-cosine floor so a near-tie *visual* dual-category
+  post isn't collapsed to Uncategorized by the peaky softmax (needs on-machine tuning).
 - Consider ESLint `no-undef` in the pre-push checks.
 
 Full review with per-finding fixes: run history / prior thread. Verified findings covered

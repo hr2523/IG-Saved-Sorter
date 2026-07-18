@@ -32,6 +32,12 @@ export const TAG_VOCAB = [
   "black and white photography", "film photography", "aesthetic", "minimalism", "vintage",
   // misc creative
   "animation", "comic", "fantasy art", "science", "space", "fashion editorial",
+  // design / product
+  "ui design", "ux design", "web design", "app design", "dashboard", "wireframe", "mockup", "product design",
+  // motion / 3d / film
+  "cgi", "vfx", "visual effects", "3d animation", "render", "cinematography", "film still", "reel", "short film", "concept art",
+  // tutorial / education
+  "tutorial", "how-to", "step by step", "diagram", "explainer",
 ];
 
 const STOPWORDS = new Set(
