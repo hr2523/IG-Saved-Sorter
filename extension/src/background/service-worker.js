@@ -401,24 +401,29 @@ async function runSync({ limit } = {}) {
     await nudgeScroll(tabId);
     await waitFor(() => capture.template || capture.pages.length, 9000);
     let hadNew = (await drainCaptured()) > 0;
+    addLog("info", `fetch: captured template=${!!capture.template}, cursor=${lastCursor ? "yes" : "no"}, firstBatch=${stored}`);
 
     // 2) Primary: replay the captured request with cursors (no scrolling).
     if (capture.template && lastCursor) {
+      addLog("info", "fetch: using API replay (no scroll)");
       let cursor = lastCursor, pages = 0, stale = 0;
       while (cursor && pages < MAX_PAGES && !cancelRequested && !(limit && stored >= limit)) {
         const raw = await replayInPage(tabId, capture.template, cursor);
-        if (!raw || raw.__error) break;
+        if (!raw || raw.__error) { addLog("error", `replay page ${pages + 1} failed: ${raw && raw.__error}`); break; }
         const page = normalizePage(raw);
         const n = await processItems(page.items);
         await drainCaptured();
         pages++;
+        addLog("info", `replay page ${pages}: +${n} new, total ${stored}, cursor=${page.nextMaxId ? "yes" : "no"}`);
         if (n === 0) { if (++stale >= 2) break; } else stale = 0; // early-exit: nothing new
         if (!page.moreAvailable && !page.nextMaxId) break;
         cursor = page.nextMaxId || lastCursor;
         await sleep(500);
       }
-    } else if (!anyData) {
+      addLog("info", `fetch: replay finished (${pages} pages, ${stored} stored)`);
+    } else {
       // 3) Fallbacks: robust scroll (harvesting intercepted responses), then DOM scrape.
+      addLog("info", "fetch: NO replay (no captured request) — falling back to scrolling");
       await scrollInterceptFallback(tabId, processItems, drainCaptured);
     }
 
@@ -466,7 +471,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   // Captures relayed from the page interceptor (no response needed).
   if (msg.type === "IG_CAPTURE") {
     if (msg.kind === "page" && msg.json) {
-      if (msg.template && !capture.template) capture.template = msg.template;
+      if (msg.template && !capture.template) {
+        capture.template = msg.template;
+        const u = String(msg.template.url || "").split("?")[0];
+        addLog("info", `intercepted ${msg.template.method || "?"} …${u.slice(-52)}`);
+      }
       capture.pages.push(msg.json);
     }
     return; // fire-and-forget
