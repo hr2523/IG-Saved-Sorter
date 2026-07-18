@@ -1,32 +1,42 @@
-// Offscreen classifier. Uses transformers.js's official zero-shot-image-
-// classification pipeline (which builds the model inputs correctly) instead of
-// hand-wiring CLIP. Scores each thumbnail against the category names + a tag
-// vocabulary in one pass, then stores category + keywords in IndexedDB.
+// Offscreen classifier. Two engines:
+//  - "embed" (preferred): hand-wired CLIP — precompute normalized TEXT embeddings
+//    for category prototypes (mean-pooled over the descriptive phrases, prompt-
+//    ensembled) + tag embeddings ONCE, encode each IMAGE once, blend image+caption
+//    by cosine. Fast (~10x) and honors imageWeight/captionWeight.
+//  - "pipeline" (fallback): the zero-shot-image-classification pipeline, but fed the
+//    real descriptive phrases (not display names). Used if the embed path fails to
+//    load or self-test (this CLIP API previously threw "Missing input_ids", so we
+//    verify it works before committing to it).
+// The active engine is logged so we always know which path ran.
 
 import { MSG, broadcast } from "../lib/messaging.js";
 import { DEFAULT_SETTINGS } from "../lib/settings.js";
 import { addLog } from "../lib/log.js";
-import { UNCATEGORIZED } from "../lib/categories.js";
+import { UNCATEGORIZED, expandPrompts } from "../lib/categories.js";
 import { TAG_VOCAB, extractCaptionKeywords } from "../lib/tags.js";
 import { getPost, putPost, getThumbnail } from "../lib/db.js";
 
 self.addEventListener("unhandledrejection", (e) => addLog("error", "offscreen: " + ((e.reason && e.reason.message) || e.reason)));
 self.addEventListener("error", (e) => addLog("error", "offscreen: " + (e.message || e)));
 
-let T = null; // transformers.js module
-let pipe = null; // zero-shot-image-classification pipeline
+const TEMP = 100; // CLIP logit_scale ~= exp(log(1/0.07)) ~= 100
+const TAG_FLOOR = 0.2; // min cosine for a keyword tag (embed engine)
+
+let T = null;
+let engine = null; // "embed" | "pipeline"
+let emb = null; // { tokenizer, processor, textModel, visionModel }
+let pipe = null;
+let cache = { key: null }; // prototypes/tag embeddings or pipeline labels, keyed by categories JSON
 
 async function loadTransformers() {
   if (T) return T;
   try {
     T = await import(chrome.runtime.getURL("src/lib/transformers.min.js"));
   } catch (e) {
-    throw new Error(
-      "transformers.js is not vendored. Run `bash extension/setup.sh` once. (" + (e.message || e) + ")"
-    );
+    throw new Error("transformers.js not vendored. Run `bash extension/setup.sh`. (" + (e.message || e) + ")");
   }
   T.env.allowLocalModels = false;
-  T.env.allowRemoteModels = true; // weights fetched once from HF, then cached
+  T.env.allowRemoteModels = true;
   try {
     T.env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL("src/wasm/");
     T.env.backends.onnx.wasm.numThreads = 1;
@@ -34,33 +44,164 @@ async function loadTransformers() {
   return T;
 }
 
-async function ensurePipe(modelId) {
-  if (pipe) return;
-  const t = await loadTransformers();
-  broadcast({ type: MSG.PROGRESS, phase: "model", message: "Loading CLIP model (first run downloads ~90 MB)…" });
-  pipe = await t.pipeline("zero-shot-image-classification", modelId, { quantized: true });
+// --- math helpers -------------------------------------------------------
+function l2(arr) {
+  let s = 0;
+  for (let i = 0; i < arr.length; i++) s += arr[i] * arr[i];
+  const n = Math.sqrt(s) || 1;
+  const out = new Float32Array(arr.length);
+  for (let i = 0; i < arr.length; i++) out[i] = arr[i] / n;
+  return out;
 }
-
+function dot(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
+function softmax(scores) {
+  const scaled = scores.map((s) => s * TEMP);
+  const m = Math.max(...scaled);
+  const ex = scaled.map((s) => Math.exp(s - m));
+  const sum = ex.reduce((a, b) => a + b, 0) || 1;
+  return ex.map((e) => e / sum);
+}
 function mergeKeywords(tags, caption, max = 6) {
-  const out = [];
-  const seen = new Set();
+  const out = [], seen = new Set();
   for (const t of tags) { const k = t.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(t); } if (out.length >= 4) break; }
   for (const w of extractCaptionKeywords(caption, 3)) { if (out.length >= max) break; if (!seen.has(w)) { seen.add(w); out.push(w); } }
   return out.slice(0, max);
 }
 
+// --- embed engine -------------------------------------------------------
+async function encodeTexts(texts) {
+  const inputs = emb.tokenizer(texts, { padding: true, truncation: true });
+  const out = await emb.textModel(inputs);
+  const tensor = out.text_embeds || out.pooler_output || out;
+  const [n, d] = tensor.dims;
+  const vecs = [];
+  for (let i = 0; i < n; i++) vecs.push(l2(tensor.data.subarray(i * d, (i + 1) * d)));
+  return vecs;
+}
+async function encodeImage(image) {
+  const inputs = await emb.processor(image);
+  const out = await emb.visionModel(inputs);
+  const tensor = out.image_embeds || out.pooler_output || out;
+  return l2(tensor.data);
+}
+
+async function initEmbed(modelId) {
+  const t = await loadTransformers();
+  broadcast({ type: MSG.PROGRESS, phase: "model", message: "Loading CLIP model (first run downloads ~90 MB)…" });
+  const opts = { quantized: true };
+  const tokenizer = await t.AutoTokenizer.from_pretrained(modelId);
+  const processor = await t.AutoProcessor.from_pretrained(modelId);
+  const textModel = await t.CLIPTextModelWithProjection.from_pretrained(modelId, opts);
+  const visionModel = await t.CLIPVisionModelWithProjection.from_pretrained(modelId, opts);
+  emb = { tokenizer, processor, textModel, visionModel };
+  // Self-test the vision path (this is what threw "Missing input_ids" before).
+  const test = new t.RawImage(new Uint8ClampedArray(4 * 4 * 3), 4, 4, 3);
+  await encodeImage(test);
+}
+
+async function buildEmbedPrototypes(categories) {
+  const key = JSON.stringify(categories);
+  if (cache.key === key && cache.protos) return cache;
+  const catNames = Object.keys(categories);
+  const protos = [];
+  for (const name of catNames) {
+    const vecs = await encodeTexts(expandPrompts(categories[name]));
+    const d = vecs[0].length;
+    const avg = new Float32Array(d);
+    for (const v of vecs) for (let i = 0; i < d; i++) avg[i] += v[i];
+    for (let i = 0; i < d; i++) avg[i] /= vecs.length;
+    protos.push(l2(avg));
+  }
+  const tagEmb = await encodeTexts(TAG_VOCAB.map((t) => "a photo of " + t));
+  cache = { key, catNames, protos, tagEmb };
+  return cache;
+}
+
+async function classifyEmbed(post, caption, blob, settings) {
+  const image = await T.RawImage.fromBlob(blob);
+  const imgVec = await encodeImage(image);
+  let capVec = null;
+  if (caption) { const [v] = await encodeTexts([caption.slice(0, 200)]); capVec = v; }
+
+  const { catNames, protos, tagEmb } = await buildEmbedPrototypes(settings.categories);
+  const iw = settings.imageWeight ?? 0.45, cw = settings.captionWeight ?? 0.55;
+  const scores = protos.map((p) => {
+    let s = dot(imgVec, p) * (capVec ? iw : 1);
+    if (capVec) s += cw * dot(capVec, p);
+    return s;
+  });
+  const probs = softmax(scores);
+  let best = 0;
+  for (let i = 1; i < probs.length; i++) if (probs[i] > probs[best]) best = i;
+  post.confidence = probs[best];
+  post.category = probs[best] >= settings.threshold ? catNames[best] : UNCATEGORIZED;
+  post.scores = catNames.map((c, i) => ({ category: c, p: probs[i] })).sort((a, b) => b.p - a.p).slice(0, 3);
+
+  const topTags = tagEmb
+    .map((te, i) => ({ t: TAG_VOCAB[i], s: dot(imgVec, te) }))
+    .filter((x) => x.s >= TAG_FLOOR)
+    .sort((a, b) => b.s - a.s).slice(0, 4).map((x) => x.t);
+  post.keywords = mergeKeywords(topTags, caption);
+}
+
+// --- pipeline engine (fallback) -----------------------------------------
+async function initPipeline(modelId) {
+  const t = await loadTransformers();
+  broadcast({ type: MSG.PROGRESS, phase: "model", message: "Loading CLIP model (pipeline)…" });
+  pipe = await t.pipeline("zero-shot-image-classification", modelId, { quantized: true });
+}
+function buildPipelineLabels(categories) {
+  const key = "pipe:" + JSON.stringify(categories);
+  if (cache.key === key && cache.labels) return cache;
+  const catNames = Object.keys(categories);
+  const phraseToCat = {};
+  const phrases = [];
+  for (const name of catNames) for (const ph of categories[name]) { phrases.push(ph); phraseToCat[ph] = name; }
+  cache = { key, catNames, phrases, phraseToCat, labels: [...phrases, ...TAG_VOCAB] };
+  return cache;
+}
+async function classifyPipeline(post, caption, blob, settings) {
+  const image = await T.RawImage.fromBlob(blob);
+  const { catNames, phrases, phraseToCat, labels } = buildPipelineLabels(settings.categories);
+  const out = await pipe(image, labels, { hypothesis_template: "a photo of {}" });
+  const score = {};
+  for (const o of out) score[o.label] = o.score;
+  // aggregate phrase scores back to their category (max)
+  const catScore = {};
+  for (const ph of phrases) { const c = phraseToCat[ph]; catScore[c] = Math.max(catScore[c] || 0, score[ph] || 0); }
+  const sum = catNames.reduce((a, c) => a + (catScore[c] || 0), 0) || 1;
+  let best = catNames[0], bestS = -1;
+  for (const c of catNames) { const p = (catScore[c] || 0) / sum; if (p > bestS) { bestS = p; best = c; } }
+  post.confidence = bestS;
+  post.category = bestS >= settings.threshold ? best : UNCATEGORIZED;
+  post.scores = catNames.map((c) => ({ category: c, p: (catScore[c] || 0) / sum })).sort((a, b) => b.p - a.p).slice(0, 3);
+  // tags: renormalize across tags + floor
+  const tagSum = TAG_VOCAB.reduce((a, t) => a + (score[t] || 0), 0) || 1;
+  const topTags = TAG_VOCAB.map((t) => ({ t, s: (score[t] || 0) / tagSum }))
+    .sort((a, b) => b.s - a.s).slice(0, 4).filter((x) => x.s >= 1.5 / TAG_VOCAB.length).map((x) => x.t);
+  post.keywords = mergeKeywords(topTags, caption);
+}
+
+// --- driver -------------------------------------------------------------
+async function ensureEngine(modelId) {
+  if (engine) return;
+  try {
+    await initEmbed(modelId);
+    engine = "embed";
+    addLog("info", "classifier: embedding path (fast, caption-blend, phrases)");
+  } catch (e) {
+    addLog("error", "embedding path unavailable, using pipeline: " + ((e && e.message) || e));
+    await initPipeline(modelId);
+    engine = "pipeline";
+    addLog("info", "classifier: pipeline path (image-only, phrases)");
+  }
+}
+
 async function classifyIds(ids, settingsIn) {
-  // Settings come from the service worker (offscreen can't read chrome.storage).
   const settings = { ...DEFAULT_SETTINGS, ...(settingsIn || {}) };
-  await ensurePipe(settings.model);
+  await ensureEngine(settings.model);
 
-  const catNames = Object.keys(settings.categories);
-  const labels = [...catNames, ...TAG_VOCAB];
-  const catSet = new Set(catNames);
-
-  let done = 0;
-  let errorCount = 0;
-  let firstErrorMsg = null;
+  let done = 0, errorCount = 0, firstErrorMsg = null;
   for (const id of ids) {
     try {
       const post = await getPost(id);
@@ -69,49 +210,21 @@ async function classifyIds(ids, settingsIn) {
       const blob = await getThumbnail(id);
 
       if (!blob) {
-        // No blob but a URL exists -> leave it retryable for the SW's thumbnail
-        // recovery pass; only finalize Uncategorized when there's truly no image.
-        if (post.thumbnailUrl) {
-          post.status = "needs_thumb";
-        } else {
-          post.category = UNCATEGORIZED;
-          post.confidence = 0;
-          post.keywords = mergeKeywords([], caption);
-          post.status = "done";
-        }
+        if (post.thumbnailUrl) { post.status = "needs_thumb"; }
+        else { post.category = UNCATEGORIZED; post.confidence = 0; post.keywords = mergeKeywords([], caption); post.status = "done"; }
         await putPost(post);
         done++;
         continue;
       }
 
-      const image = await T.RawImage.fromBlob(blob);
-      const out = await pipe(image, labels, { hypothesis_template: "a photo of {}" });
-      const score = {};
-      for (const o of out) score[o.label] = o.score;
-
-      // Scores are softmaxed over ALL labels (categories + tags), so each is
-      // tiny. Renormalize across just the categories to get a real category
-      // distribution before thresholding — otherwise everything looks < 0.15.
-      const catSum = catNames.reduce((a, c) => a + (score[c] || 0), 0) || 1;
-      const catNorm = {};
-      for (const c of catNames) catNorm[c] = (score[c] || 0) / catSum;
-
-      let best = catNames[0], bestS = -1;
-      for (const c of catNames) { if (catNorm[c] > bestS) { bestS = catNorm[c]; best = c; } }
-      post.confidence = bestS;
-      post.category = bestS >= settings.threshold ? best : UNCATEGORIZED;
-      post.scores = catNames.map((c) => ({ category: c, p: catNorm[c] })).sort((a, b) => b.p - a.p).slice(0, 3);
-
-      // keywords: top tags (from the same pass) + caption words
-      const topTags = TAG_VOCAB.map((t) => ({ t, s: score[t] || 0 })).sort((a, b) => b.s - a.s).slice(0, 4).map((x) => x.t);
-      post.keywords = mergeKeywords(topTags, caption);
+      if (engine === "embed") await classifyEmbed(post, caption, blob, settings);
+      else await classifyPipeline(post, caption, blob, settings);
       post.status = "done";
+      post.error = null;
       await putPost(post);
     } catch (e) {
       errorCount++;
       if (!firstErrorMsg) firstErrorMsg = String((e && e.message) || e);
-      // status "error" (not "done") so it's not silently counted as classified
-      // and can be retried, but also not re-run every sync automatically.
       const post = await getPost(id);
       if (post) { post.status = "error"; post.error = String(e.message || e); await putPost(post); }
     }
@@ -120,18 +233,16 @@ async function classifyIds(ids, settingsIn) {
       broadcast({ type: MSG.PROGRESS, phase: "classify", done, total: ids.length, message: `Classified ${done}/${ids.length}` });
     }
   }
-  if (errorCount) {
-    broadcast({ type: MSG.ERROR, where: "classify", message: `${errorCount} of ${ids.length} failed (${firstErrorMsg})` });
-  }
+  if (errorCount) broadcast({ type: MSG.ERROR, where: "classify", message: `${errorCount} of ${ids.length} failed (${firstErrorMsg})` });
 }
 
+// Serialize classify requests — never run two inferences on the shared model.
+let inFlight = Promise.resolve();
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.type !== MSG.OFFSCREEN_CLASSIFY) return;
-  classifyIds(msg.ids || [], msg.settings)
-    .then(() => sendResponse({ ok: true }))
-    .catch((e) => {
-      broadcast({ type: MSG.ERROR, where: "classify", message: String((e && e.message) || e) });
-      sendResponse({ ok: false, error: String(e.message || e) });
-    });
+  inFlight = inFlight.then(() => classifyIds(msg.ids || [], msg.settings)).catch((e) => {
+    broadcast({ type: MSG.ERROR, where: "classify", message: String((e && e.message) || e) });
+  });
+  inFlight.then(() => sendResponse({ ok: true }));
   return true;
 });
