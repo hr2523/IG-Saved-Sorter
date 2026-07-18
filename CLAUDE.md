@@ -10,7 +10,7 @@ with CLIP. Two deliverables live in this repo:
   user's saved posts *in their logged-in browser* (no login/2FA), classifies in-browser
   with transformers.js CLIP, and shows a gallery. **All recent work is here.**
 
-Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.8.4**
+Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.8.5**
 (see `extension/manifest.json`). GitHub repo scope: `hr2523/ig-saved-sorter`.
 
 ---
@@ -91,17 +91,30 @@ towers), so `CLIPVisionModelWithProjection` can't load a vision-only session —
 image alone still demands `input_ids`, hence the throw. The pipeline works because it feeds
 `input_ids`+`pixel_values` together to that same merged graph.
 
-**v0.8.4 fix — `initEmbed` now self-selects a working embed strategy** (in `classifier.js`),
-trying each and self-testing BOTH the vision and text paths before committing:
-1. `split:<configured model>` — `…WithProjection` on patch32 (today's path)
-2. `features:<configured model>` — merged `CLIPModel` via `get_image_features`/`get_text_features`
-3. `split:Xenova/clip-vit-base-patch16` — a model that DOES ship separate text/vision ONNX exports
-…else fall back to the pipeline (unchanged). Each candidate is isolated, so a throw just moves
-on — the fast path can only be gained, never regress. **Check the logs** for
-`embed self-test OK via <label>` (which strategy won) or `embed attempt <label> failed — …`,
-and `classifier: embedding path … — model <id>` vs `classifier: pipeline path`. Since this
-can't be reproduced in-sandbox (HF is 403), the winning strategy is confirmed from the user's
-Logs panel. If ALL embed strategies fail, that's the next thing to debug.
+**What v0.8.4 tried and what the user's logs proved (important):** v0.8.4 made `initEmbed`
+self-select among three strategies. The user's Logs panel then showed ALL THREE failing:
+- `split:<model>` (both patch32 AND patch16) → `Missing … input_ids`. So this is **not**
+  model-specific: in transformers.js **2.17.2**, `CLIPVisionModelWithProjection` never yields a
+  vision-only session — every split load is a two-tower graph that demands `input_ids`. There is
+  no "use a model with separate exports" escape hatch in this version.
+- `features:<model>` → **`CLIPModel exposes no get_text_features/get_image_features`** — those
+  methods simply don't exist in 2.17.2.
+
+**v0.8.5 fix — the "merged dummy-tower" strategy** (in `classifier.js` `buildEmbedModels`):
+run the SAME merged graph the pipeline already runs successfully, but feed a throwaway **dummy**
+to the tower we don't need and read only the output we want — `image_embeds` depends solely on
+`pixel_values`, `text_embeds` solely on `input_ids`. So we encode each image via
+`model({ pixel_values, ...dummyText })` → read `image_embeds`, and cache category/tag text via
+`model({ input_ids, attention_mask, pixel_values: dummyPixels })` → read `text_embeds`. Because
+it's the pipeline's own graph, it loads wherever the pipeline does — but we stop re-encoding
+~150 label texts per image, which is the ~10× win. `initEmbed` now tries
+`merged:<configured>` → `split:<configured>` → `merged:Xenova/clip-vit-base-patch16`, self-testing
+BOTH paths (with two texts, to catch any text/image batch-size coupling) before committing, else
+pipeline. **Check the logs** for `embed self-test OK via merged:<id>` and
+`classifier: embedding path … — model <id>` (success) vs `classifier: pipeline path`. Can't be
+reproduced in-sandbox (HF 403), so it's confirmed from the user's Logs panel + per-post timing.
+If `merged:` also fails its self-test, read the new `embed attempt merged:<id> failed — …` line —
+that's the next thing to debug (likely the merged export not surfacing `image_embeds`/`text_embeds`).
 
 ---
 
@@ -117,13 +130,19 @@ Done recently (from an adversarial code review — 21 verified findings):
 - **v0.8.2 Phase C** — categorization rewrite: real phrases + prompt ensembling +
   image/caption blend + ~10× fewer text encodes, with the pipeline fallback.
 - **v0.8.3** — fix missing `getThumbnail` import.
-- **v0.8.4** — unblock the fast embed path: `initEmbed` self-selects a working CLIP strategy
-  (split→`get_*_features`→patch16 split), self-testing vision+text before committing, so the
-  ~10× fast path is used whenever any strategy works instead of always falling to the slow
-  pipeline. Root-caused the "Missing input_ids" throw to patch32 shipping only a merged graph.
+- **v0.8.4** — first attempt to unblock the fast embed path (split→`get_*_features`→patch16
+  split, self-tested). The user's logs proved all three fail in transformers.js 2.17.2 (split =
+  `Missing input_ids` on BOTH models; `CLIPModel` has no `get_*_features`). Superseded by 0.8.5.
   (Background-execution question that prompted this: closing the popup / switching tabs does
   NOT throttle classify — it's a pure `await`/WASM loop in the offscreen doc; the felt "lag"
   was the slow pipeline path, which this targets.)
+- **v0.8.5** — the fix that should actually stick: **merged dummy-tower** embed strategy. Run
+  the pipeline's own merged CLIP graph but feed a dummy to the unused tower and read
+  `image_embeds`/`text_embeds` separately — encode each image once, cache text once (~10× win),
+  using a graph proven to load on the user's machine. `initEmbed` tries `merged:<configured>` →
+  `split:<configured>` → `merged:patch16`, self-tested, else pipeline. Confirm from the Logs
+  panel (`embed self-test OK via merged:…`) + per-post timing (expect well under the pipeline's
+  ~3 s/post).
 
 ### Not yet done (remaining verified review findings, lower priority)
 - Gallery re-reads all posts + re-decodes all thumbnails every 1.5s during classify

@@ -86,31 +86,38 @@ async function encodeImage(image) {
   return l2(tensor.data);
 }
 
-// A model known to ship separate text_model/vision_model ONNX exports that the
-// `…WithProjection` classes can load as independent graphs (the configured
-// default, patch32, ships only a merged graph → "Missing input_ids" on the
-// vision self-test, forcing the slow pipeline fallback).
-const SPLIT_FALLBACK_MODEL = "Xenova/clip-vit-base-patch16";
+// Fallback model tried if the configured one can't be made to encode. The real fix
+// is the "merged" strategy below, which works on any model whose merged CLIP graph
+// the pipeline can already run — so this is just a second roll of the same dice.
+const FALLBACK_MODEL = "Xenova/clip-vit-base-patch16";
 
-// Build a self-encoding CLIP two different ways so we can encode the IMAGE once
-// and reuse cached TEXT embeddings (the ~10x win). Returns { textModel, visionModel }
-// as async callables compatible with encodeTexts/encodeImage (which read
-// out.text_embeds/out.image_embeds, else fall through to the tensor itself).
-async function buildEmbedModels(t, modelId, mode, opts) {
+// Produce { textModel, visionModel } as async callables compatible with
+// encodeTexts/encodeImage (which read out.text_embeds / out.image_embeds). Two modes:
+//   "merged" (primary): the standard export (e.g. Xenova/clip-vit-base-patch32) ships
+//     ONLY the merged two-tower graph, so a vision-only forward is impossible — encoding
+//     an image alone throws "Missing input_ids", AND transformers.js 2.17.2's CLIPModel
+//     has no get_*_features. BUT image_embeds depends only on pixel_values and text_embeds
+//     only on input_ids, so we run the merged graph feeding a throwaway DUMMY to the other
+//     tower and read just the output we want. This is the exact graph the pipeline already
+//     runs (so it loads wherever the pipeline does), but we cache the text side and encode
+//     each image once — the ~10x win the split path was meant to give, restored.
+//   "split": models that genuinely ship separate text_model/vision_model ONNX exports
+//     (kept only as a secondary attempt; known to fail on patch16/patch32 in 2.17.2).
+async function buildEmbedModels(t, modelId, mode, opts, tokenizer, processor) {
   if (mode === "split") {
     const textModel = await t.CLIPTextModelWithProjection.from_pretrained(modelId, opts);
     const visionModel = await t.CLIPVisionModelWithProjection.from_pretrained(modelId, opts);
     return { textModel, visionModel };
   }
-  // "features": one merged CLIPModel exposing get_text_features/get_image_features,
-  // which run the two towers independently (works even when the split exports are absent).
-  const m = await t.CLIPModel.from_pretrained(modelId, opts);
-  if (typeof m.get_text_features !== "function" || typeof m.get_image_features !== "function") {
-    throw new Error("CLIPModel exposes no get_text_features/get_image_features");
-  }
+  const model = await t.CLIPModel.from_pretrained(modelId, opts);
+  // Dummies just satisfy the merged graph's required inputs; the output we read
+  // (image_embeds / text_embeds) does not depend on the dummy tower.
+  const dummyImage = new t.RawImage(new Uint8ClampedArray(4 * 4 * 3), 4, 4, 3);
+  const { pixel_values: dummyPixels } = await processor(dummyImage);
+  const dummyText = tokenizer(["a photo"], { padding: true, truncation: true });
   return {
-    textModel: (inputs) => m.get_text_features(inputs),
-    visionModel: (inputs) => m.get_image_features(inputs),
+    textModel: (inputs) => model({ ...inputs, pixel_values: dummyPixels }),
+    visionModel: (inputs) => model({ ...inputs, ...dummyText }),
   };
 }
 
@@ -118,12 +125,14 @@ async function initEmbed(modelId) {
   const t = await loadTransformers();
   broadcast({ type: MSG.PROGRESS, phase: "model", message: "Loading CLIP model (first run downloads ~90 MB)…" });
   const opts = { quantized: true };
-  // Try strategies cheapest-first; commit to the first that passes BOTH self-tests.
-  // Each is isolated so a throw (e.g. the historic "Missing input_ids") just moves on.
+  // Try strategies in order; commit to the first that passes BOTH self-tests. Each is
+  // isolated so a throw (e.g. the historic "Missing input_ids") just moves on. "merged"
+  // is primary because it runs the same graph the pipeline uses — it works wherever the
+  // pipeline does, so the fast path is finally reachable.
   const attempts = [
+    { label: `merged:${modelId}`, model: modelId, mode: "merged" },
     { label: `split:${modelId}`, model: modelId, mode: "split" },
-    { label: `features:${modelId}`, model: modelId, mode: "features" },
-    { label: `split:${SPLIT_FALLBACK_MODEL}`, model: SPLIT_FALLBACK_MODEL, mode: "split" },
+    { label: `merged:${FALLBACK_MODEL}`, model: FALLBACK_MODEL, mode: "merged" },
   ];
   const test = new t.RawImage(new Uint8ClampedArray(4 * 4 * 3), 4, 4, 3);
   let lastErr = null;
@@ -131,13 +140,13 @@ async function initEmbed(modelId) {
     try {
       const tokenizer = await t.AutoTokenizer.from_pretrained(a.model);
       const processor = await t.AutoProcessor.from_pretrained(a.model);
-      const { textModel, visionModel } = await buildEmbedModels(t, a.model, a.mode, opts);
+      const { textModel, visionModel } = await buildEmbedModels(t, a.model, a.mode, opts, tokenizer, processor);
       emb = { tokenizer, processor, textModel, visionModel };
       embedModelId = a.model;
-      // Self-test BOTH paths — the vision path is what historically threw, but the
-      // text path must work too since classification blends image + caption.
+      // Self-test BOTH paths (vision historically threw). Use TWO texts so a graph that
+      // ties text/image batch sizes would fail HERE, not at first real use.
       await encodeImage(test);
-      await encodeTexts(["a photo of a cat"]);
+      await encodeTexts(["a photo of a cat", "a city skyline at night"]);
       addLog("info", `classifier: embed self-test OK via ${a.label}`);
       return;
     } catch (e) {
