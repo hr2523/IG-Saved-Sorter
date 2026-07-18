@@ -224,22 +224,22 @@ async function resolveCollectionPk(tabId, collectionName) {
   return match.pk;
 }
 
-// The active tab must be showing a Saved page (…/saved/…). We read posts from
-// the rendered grid rather than Instagram's private API (which 404s on GraphQL-
-// only accounts). Returns the tab id.
+// Find the Instagram Saved-page tab. We search ALL tabs (not just the active
+// one) so Sync works from the gallery tab too — when you click Sync in the
+// gallery, the gallery is the active tab, not Instagram.
 async function getActiveSavedTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const url = (tab && tab.url) || "";
-  if (!/^https:\/\/www\.instagram\.com\//.test(url)) {
-    throw new Error("Open instagram.com in the active tab, go to your Saved page, then Sync.");
+  const tabs = await chrome.tabs.query({ url: "https://www.instagram.com/*" });
+  const saved = tabs.filter((t) => /\/saved\//.test(t.url || ""));
+  if (saved.length) {
+    return (saved.find((t) => t.active) || saved[0]).id;
   }
-  if (!/\/saved\//.test(url)) {
+  if (tabs.length) {
     throw new Error(
-      "Open your Saved page first: Profile → Saved → the collection you want " +
-        "(URL should contain /saved/). Then click Sync."
+      "An Instagram tab is open but not on your Saved page. Go to Profile → " +
+        "Saved → a collection (URL contains /saved/), then click Sync."
     );
   }
-  return tab.id;
+  throw new Error("Open instagram.com, go to your Saved page, then click Sync.");
 }
 
 // Injected into the page: scroll a few times and return EVERY saved post seen so

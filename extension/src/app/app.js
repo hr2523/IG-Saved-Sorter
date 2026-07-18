@@ -145,11 +145,19 @@ $("sync").onclick = async () => {
 };
 $("cancel").onclick = () => chrome.runtime.sendMessage({ type: MSG.CANCEL_SYNC });
 
+let lastRefresh = 0;
 chrome.runtime.onMessage.addListener((m) => {
   if (!m || !m.type) return;
   if (m.type === MSG.PROGRESS) {
+    setBusy(true);
     setMsg(m.message || "");
     $("bar").style.width = m.total ? Math.round((m.done / m.total) * 100) + "%" : "40%";
+    // Refresh the grid as classification lands (throttled), so categories show
+    // up progressively and don't depend on the final DONE (the SW may sleep).
+    if (m.phase === "classify" && Date.now() - lastRefresh > 1500) {
+      lastRefresh = Date.now();
+      load();
+    }
   } else if (m.type === MSG.DONE) {
     setBusy(false);
     $("bar").style.width = "100%";
