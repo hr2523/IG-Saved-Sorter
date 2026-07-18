@@ -1,25 +1,20 @@
-// Offscreen classifier: loads a local CLIP model (transformers.js) and scores
-// each saved post by blending its thumbnail image with its caption. Reads
-// posts + thumbnail blobs + settings from storage itself, writes the category
-// back to IndexedDB, and broadcasts PROGRESS as it goes.
+// Offscreen classifier. Uses transformers.js's official zero-shot-image-
+// classification pipeline (which builds the model inputs correctly) instead of
+// hand-wiring CLIP. Scores each thumbnail against the category names + a tag
+// vocabulary in one pass, then stores category + keywords in IndexedDB.
 
 import { MSG, broadcast } from "../lib/messaging.js";
 import { DEFAULT_SETTINGS } from "../lib/settings.js";
 import { addLog } from "../lib/log.js";
-
-self.addEventListener("unhandledrejection", (e) => addLog("error", "offscreen: " + ((e.reason && e.reason.message) || e.reason)));
-self.addEventListener("error", (e) => addLog("error", "offscreen: " + (e.message || e)));
-import { expandPrompts, UNCATEGORIZED } from "../lib/categories.js";
+import { UNCATEGORIZED } from "../lib/categories.js";
 import { TAG_VOCAB, extractCaptionKeywords } from "../lib/tags.js";
 import { getPost, putPost, getThumbnail } from "../lib/db.js";
 
+self.addEventListener("unhandledrejection", (e) => addLog("error", "offscreen: " + ((e.reason && e.reason.message) || e.reason)));
+self.addEventListener("error", (e) => addLog("error", "offscreen: " + (e.message || e)));
+
 let T = null; // transformers.js module
-let textModel = null;
-let visionModel = null;
-let processor = null;
-let tokenizer = null;
-let labelCache = { key: null, names: [], vectors: [] };
-let tagCache = null; // { names, vectors }
+let pipe = null; // zero-shot-image-classification pipeline
 
 async function loadTransformers() {
   if (T) return T;
@@ -27,212 +22,85 @@ async function loadTransformers() {
     T = await import(chrome.runtime.getURL("src/lib/transformers.min.js"));
   } catch (e) {
     throw new Error(
-      "transformers.js is not vendored. Run `bash extension/setup.sh` once to " +
-        "download the model runtime. (" + (e.message || e) + ")"
+      "transformers.js is not vendored. Run `bash extension/setup.sh` once. (" + (e.message || e) + ")"
     );
   }
   T.env.allowLocalModels = false;
-  T.env.allowRemoteModels = true; // model weights (data, not code) fetched once, then cached
+  T.env.allowRemoteModels = true; // weights fetched once from HF, then cached
   try {
     T.env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL("src/wasm/");
-    T.env.backends.onnx.wasm.numThreads = 1; // SharedArrayBuffer often unavailable here
+    T.env.backends.onnx.wasm.numThreads = 1;
   } catch (_) {}
   return T;
 }
 
-async function ensureModel(modelId) {
-  if (visionModel) return;
+async function ensurePipe(modelId) {
+  if (pipe) return;
   const t = await loadTransformers();
   broadcast({ type: MSG.PROGRESS, phase: "model", message: "Loading CLIP model (first run downloads ~90 MB)…" });
-  // transformers.js uses the projection sub-models (NOT CLIPModel.get_*_features,
-  // which is the Python API and doesn't exist here).
-  const opts = { quantized: true };
-  tokenizer = await t.AutoTokenizer.from_pretrained(modelId);
-  processor = await t.AutoProcessor.from_pretrained(modelId);
-  textModel = await t.CLIPTextModelWithProjection.from_pretrained(modelId, opts);
-  visionModel = await t.CLIPVisionModelWithProjection.from_pretrained(modelId, opts);
+  pipe = await t.pipeline("zero-shot-image-classification", modelId, { quantized: true });
 }
 
-function l2normalize(arr) {
-  let s = 0;
-  for (let i = 0; i < arr.length; i++) s += arr[i] * arr[i];
-  const n = Math.sqrt(s) || 1;
-  const out = new Float32Array(arr.length);
-  for (let i = 0; i < arr.length; i++) out[i] = arr[i] / n;
-  return out;
-}
-
-function dot(a, b) {
-  let s = 0;
-  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
-  return s;
-}
-
-function softmax(scores, temp = 100) {
-  const scaled = scores.map((s) => s * temp);
-  const m = Math.max(...scaled);
-  const exps = scaled.map((s) => Math.exp(s - m));
-  const sum = exps.reduce((a, b) => a + b, 0) || 1;
-  return exps.map((e) => e / sum);
-}
-
-// Encode a batch of strings -> array of normalized Float32Array embeddings.
-async function encodeTexts(texts) {
-  const inputs = tokenizer(texts, { padding: true, truncation: true });
-  const out = await textModel(inputs);
-  const tensor = out.text_embeds || out.pooler_output || out;
-  const data = tensor.data;
-  const [n, d] = tensor.dims;
-  const vecs = [];
-  for (let i = 0; i < n; i++) {
-    vecs.push(l2normalize(data.subarray(i * d, (i + 1) * d)));
-  }
-  return vecs;
-}
-
-async function encodeImage(blob) {
-  const image = await T.RawImage.fromBlob(blob);
-  const inputs = await processor(image);
-  const out = await visionModel(inputs);
-  const tensor = out.image_embeds || out.pooler_output || out;
-  return l2normalize(tensor.data);
-}
-
-// Build one averaged, normalized embedding per category (cached).
-async function ensureLabelEmbeddings(categories) {
-  const key = JSON.stringify(categories);
-  if (labelCache.key === key) return labelCache;
-  const names = Object.keys(categories);
-  const vectors = [];
-  for (const name of names) {
-    const prompts = expandPrompts(categories[name]);
-    const embs = await encodeTexts(prompts);
-    // average then normalize
-    const d = embs[0].length;
-    const avg = new Float32Array(d);
-    for (const e of embs) for (let i = 0; i < d; i++) avg[i] += e[i];
-    for (let i = 0; i < d; i++) avg[i] /= embs.length;
-    vectors.push(l2normalize(avg));
-  }
-  labelCache = { key, names, vectors };
-  return labelCache;
-}
-
-function blend(imgVec, capVec, imageWeight, captionWeight) {
-  if (!capVec) return imgVec;
-  const d = imgVec.length;
-  const out = new Float32Array(d);
-  for (let i = 0; i < d; i++) out[i] = imageWeight * imgVec[i] + captionWeight * capVec[i];
-  return l2normalize(out);
-}
-
-// One normalized embedding per tag (cached for the session).
-async function ensureTagEmbeddings() {
-  if (tagCache) return tagCache;
-  const vectors = [];
-  for (const tag of TAG_VOCAB) {
-    const [v] = await encodeTexts(["a photo of " + tag]);
-    vectors.push(v);
-  }
-  tagCache = { names: TAG_VOCAB.slice(), vectors };
-  return tagCache;
-}
-
-// Hybrid keywords: top CLIP visual tags + salient caption words, deduped.
-function buildKeywords(imgVec, tags, caption, maxOut = 6) {
+function mergeKeywords(tags, caption, max = 6) {
   const out = [];
   const seen = new Set();
-  if (imgVec) {
-    const scored = tags.names
-      .map((name, i) => ({ name, s: dot(imgVec, tags.vectors[i]) }))
-      .sort((a, b) => b.s - a.s);
-    for (const { name, s } of scored) {
-      if (s < 0.2) break; // weak match cutoff
-      if (!seen.has(name)) { seen.add(name); out.push(name); }
-      if (out.length >= 4) break;
-    }
-  }
-  for (const w of extractCaptionKeywords(caption, 4)) {
-    if (out.length >= maxOut) break;
-    if (!seen.has(w)) { seen.add(w); out.push(w); }
-  }
-  return out.slice(0, maxOut);
+  for (const t of tags) { const k = t.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(t); } if (out.length >= 4) break; }
+  for (const w of extractCaptionKeywords(caption, 3)) { if (out.length >= max) break; if (!seen.has(w)) { seen.add(w); out.push(w); } }
+  return out.slice(0, max);
 }
 
 async function classifyIds(ids, settingsIn) {
-  // Settings are passed in from the service worker — offscreen documents can't
-  // access chrome.storage (only chrome.runtime).
+  // Settings come from the service worker (offscreen can't read chrome.storage).
   const settings = { ...DEFAULT_SETTINGS, ...(settingsIn || {}) };
-  await ensureModel(settings.model);
-  const labels = await ensureLabelEmbeddings(settings.categories);
-  const tags = await ensureTagEmbeddings();
+  await ensurePipe(settings.model);
+
+  const catNames = Object.keys(settings.categories);
+  const labels = [...catNames, ...TAG_VOCAB];
+  const catSet = new Set(catNames);
 
   let done = 0;
   let firstErrorShown = false;
   for (const id of ids) {
     try {
       const post = await getPost(id);
-      if (!post || post.manualOverride) {
-        done++;
-        continue;
-      }
+      if (!post || post.manualOverride) { done++; continue; }
+      const caption = (post.caption || "").trim();
       const blob = await getThumbnail(id);
 
-      let imgVec = null;
-      if (blob) imgVec = await encodeImage(blob);
-
-      let capVec = null;
-      const caption = (post.caption || "").trim();
-      if (caption) {
-        const [v] = await encodeTexts([caption.slice(0, 300)]);
-        capVec = v;
-      }
-
-      let scores;
-      if (imgVec && capVec) {
-        const q = blend(imgVec, capVec, settings.imageWeight, settings.captionWeight);
-        scores = labels.vectors.map((lv) => dot(q, lv));
-      } else if (imgVec) {
-        scores = labels.vectors.map((lv) => dot(imgVec, lv));
-      } else if (capVec) {
-        scores = labels.vectors.map((lv) => dot(capVec, lv));
-      } else {
-        // nothing to go on
-        post.status = "done";
+      if (!blob) {
         post.category = UNCATEGORIZED;
         post.confidence = 0;
-        post.keywords = buildKeywords(null, tags, caption);
+        post.keywords = mergeKeywords([], caption);
+        post.status = "done";
         await putPost(post);
         done++;
         continue;
       }
 
-      const probs = softmax(scores);
-      let bestIdx = 0;
-      for (let i = 1; i < probs.length; i++) if (probs[i] > probs[bestIdx]) bestIdx = i;
+      const image = await T.RawImage.fromBlob(blob);
+      const out = await pipe(image, labels, { hypothesis_template: "a photo of {}" });
+      const score = {};
+      for (const o of out) score[o.label] = o.score;
 
-      post.confidence = probs[bestIdx];
-      post.category = probs[bestIdx] >= settings.threshold ? labels.names[bestIdx] : UNCATEGORIZED;
-      post.scores = labels.names.map((n, i) => ({ category: n, p: probs[i] }))
-        .sort((a, b) => b.p - a.p)
-        .slice(0, 3);
-      post.keywords = buildKeywords(imgVec, tags, caption);
+      // best category
+      let best = catNames[0], bestS = -1;
+      for (const c of catNames) { const s = score[c] || 0; if (s > bestS) { bestS = s; best = c; } }
+      post.confidence = bestS;
+      post.category = bestS >= settings.threshold ? best : UNCATEGORIZED;
+      post.scores = catNames.map((c) => ({ category: c, p: score[c] || 0 })).sort((a, b) => b.p - a.p).slice(0, 3);
+
+      // keywords: top tags (from the same pass) + caption words
+      const topTags = TAG_VOCAB.map((t) => ({ t, s: score[t] || 0 })).sort((a, b) => b.s - a.s).slice(0, 4).map((x) => x.t);
+      post.keywords = mergeKeywords(topTags, caption);
       post.status = "done";
       await putPost(post);
     } catch (e) {
-      // Surface the FIRST failure loudly — otherwise a code/model bug just
-      // shows up as "everything Uncategorized" with no explanation.
       if (!firstErrorShown) {
         firstErrorShown = true;
         broadcast({ type: MSG.ERROR, where: "classify", message: String((e && e.message) || e) });
       }
       const post = await getPost(id);
-      if (post) {
-        post.status = "done";
-        post.category = UNCATEGORIZED;
-        post.error = String(e.message || e);
-        await putPost(post);
-      }
+      if (post) { post.status = "done"; post.category = UNCATEGORIZED; post.error = String(e.message || e); await putPost(post); }
     }
     done++;
     if (done % 3 === 0 || done === ids.length) {
@@ -246,7 +114,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   classifyIds(msg.ids || [], msg.settings)
     .then(() => sendResponse({ ok: true }))
     .catch((e) => {
-      broadcast({ type: MSG.ERROR, where: "classify", message: String(e.message || e) });
+      broadcast({ type: MSG.ERROR, where: "classify", message: String((e && e.message) || e) });
       sendResponse({ ok: false, error: String(e.message || e) });
     });
   return true;
