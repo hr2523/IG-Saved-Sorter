@@ -82,12 +82,18 @@ async function classifyIds(ids, settingsIn) {
       const score = {};
       for (const o of out) score[o.label] = o.score;
 
-      // best category
+      // Scores are softmaxed over ALL labels (categories + tags), so each is
+      // tiny. Renormalize across just the categories to get a real category
+      // distribution before thresholding — otherwise everything looks < 0.15.
+      const catSum = catNames.reduce((a, c) => a + (score[c] || 0), 0) || 1;
+      const catNorm = {};
+      for (const c of catNames) catNorm[c] = (score[c] || 0) / catSum;
+
       let best = catNames[0], bestS = -1;
-      for (const c of catNames) { const s = score[c] || 0; if (s > bestS) { bestS = s; best = c; } }
+      for (const c of catNames) { if (catNorm[c] > bestS) { bestS = catNorm[c]; best = c; } }
       post.confidence = bestS;
       post.category = bestS >= settings.threshold ? best : UNCATEGORIZED;
-      post.scores = catNames.map((c) => ({ category: c, p: score[c] || 0 })).sort((a, b) => b.p - a.p).slice(0, 3);
+      post.scores = catNames.map((c) => ({ category: c, p: catNorm[c] })).sort((a, b) => b.p - a.p).slice(0, 3);
 
       // keywords: top tags (from the same pass) + caption words
       const topTags = TAG_VOCAB.map((t) => ({ t, s: score[t] || 0 })).sort((a, b) => b.s - a.s).slice(0, 4).map((x) => x.t);

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "IG Saved Sorter",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "Organize your Instagram saved posts into topic categories, in your browser. Reads your own saved posts via your logged-in session; classifies them locally with CLIP.",
   "permissions": [
     "storage",
