@@ -59,7 +59,8 @@ async function classifyIds(ids, settingsIn) {
   const catSet = new Set(catNames);
 
   let done = 0;
-  let firstErrorShown = false;
+  let errorCount = 0;
+  let firstErrorMsg = null;
   for (const id of ids) {
     try {
       const post = await getPost(id);
@@ -68,10 +69,16 @@ async function classifyIds(ids, settingsIn) {
       const blob = await getThumbnail(id);
 
       if (!blob) {
-        post.category = UNCATEGORIZED;
-        post.confidence = 0;
-        post.keywords = mergeKeywords([], caption);
-        post.status = "done";
+        // No blob but a URL exists -> leave it retryable for the SW's thumbnail
+        // recovery pass; only finalize Uncategorized when there's truly no image.
+        if (post.thumbnailUrl) {
+          post.status = "needs_thumb";
+        } else {
+          post.category = UNCATEGORIZED;
+          post.confidence = 0;
+          post.keywords = mergeKeywords([], caption);
+          post.status = "done";
+        }
         await putPost(post);
         done++;
         continue;
@@ -101,17 +108,20 @@ async function classifyIds(ids, settingsIn) {
       post.status = "done";
       await putPost(post);
     } catch (e) {
-      if (!firstErrorShown) {
-        firstErrorShown = true;
-        broadcast({ type: MSG.ERROR, where: "classify", message: String((e && e.message) || e) });
-      }
+      errorCount++;
+      if (!firstErrorMsg) firstErrorMsg = String((e && e.message) || e);
+      // status "error" (not "done") so it's not silently counted as classified
+      // and can be retried, but also not re-run every sync automatically.
       const post = await getPost(id);
-      if (post) { post.status = "done"; post.category = UNCATEGORIZED; post.error = String(e.message || e); await putPost(post); }
+      if (post) { post.status = "error"; post.error = String(e.message || e); await putPost(post); }
     }
     done++;
     if (done % 3 === 0 || done === ids.length) {
       broadcast({ type: MSG.PROGRESS, phase: "classify", done, total: ids.length, message: `Classified ${done}/${ids.length}` });
     }
+  }
+  if (errorCount) {
+    broadcast({ type: MSG.ERROR, where: "classify", message: `${errorCount} of ${ids.length} failed (${firstErrorMsg})` });
   }
 }
 

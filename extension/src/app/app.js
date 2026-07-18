@@ -82,7 +82,7 @@ async function renderGrid() {
     card.innerHTML = `
       <div class="thumb"><span class="none">no preview</span></div>
       <div class="meta">
-        <div class="cat">${escapeHtml(p.category || UNCATEGORIZED)}${p.manualOverride ? ` <span class="manual">· edited</span>` : ""}</div>
+        <div class="cat">${p.status === "error" ? `<span class="manual" title="${escapeHtml(p.error || "classification error")}">⚠ error</span>` : p.status === "needs_thumb" ? `<span class="manual">⋯ no thumbnail</span>` : escapeHtml(p.category || UNCATEGORIZED)}${p.manualOverride ? ` <span class="manual">· edited</span>` : ""}</div>
         <ul class="kw">${kws.map((k) => `<li>${escapeHtml(k)}</li>`).join("") || `<li style="color:var(--faint)">no keywords</li>`}</ul>
         <div class="foot">
           <span class="conf"><i style="width:${conf}%"></i></span>
@@ -161,11 +161,13 @@ chrome.runtime.onMessage.addListener((m) => {
     }
   } else if (m.type === MSG.DONE) {
     setBusy(false);
+    $("reclassify").disabled = false;
     $("bar").style.width = "100%";
     setMsg(`Done — ${m.total} post(s).`);
     load();
   } else if (m.type === MSG.ERROR) {
     setBusy(false);
+    $("reclassify").disabled = false;
     setMsg(`${m.where}: ${m.message}`, true);
   }
 });
@@ -242,8 +244,18 @@ $("saveSettings").onclick = async () => {
 };
 
 $("reclassify").onclick = async () => {
+  const btn = $("reclassify");
+  if (btn.disabled) return;
+  btn.disabled = true;
   $("settingsMsg").textContent = "Re-classifying…";
-  await chrome.runtime.sendMessage({ type: MSG.RECLASSIFY_ALL });
+  setBusy(true);
+  const res = await chrome.runtime.sendMessage({ type: MSG.RECLASSIFY_ALL });
+  if (res && res.ok === false) {
+    $("settingsMsg").textContent = res.error || "Could not start.";
+    setBusy(false);
+    btn.disabled = false;
+  }
+  // otherwise the DONE broadcast re-enables via the message handler
 };
 
 $("clearData").onclick = async () => {

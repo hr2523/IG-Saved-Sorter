@@ -173,14 +173,26 @@ async function fetchThumbnailBlob(url) {
 }
 
 // --- offscreen document -------------------------------------------------
+let offscreenReady = null;
 async function ensureOffscreen() {
-  const has = await chrome.offscreen.hasDocument?.();
-  if (has) return;
-  await chrome.offscreen.createDocument({
-    url: "src/offscreen/offscreen.html",
-    reasons: ["WORKERS"],
-    justification: "Run the local CLIP model (WASM) to classify saved posts.",
-  });
+  if (await chrome.offscreen.hasDocument?.()) return;
+  // Single-flight: two callers must not both createDocument (the 2nd throws
+  // "Only a single offscreen document may be created").
+  if (!offscreenReady) {
+    offscreenReady = chrome.offscreen
+      .createDocument({
+        url: "src/offscreen/offscreen.html",
+        reasons: ["WORKERS"],
+        justification: "Run the local CLIP model (WASM) to classify saved posts.",
+      })
+      .catch((e) => {
+        if (!/single offscreen document/i.test(String(e && e.message))) {
+          offscreenReady = null;
+          throw e;
+        }
+      });
+  }
+  await offscreenReady;
 }
 
 // Send a message to the offscreen document, retrying until its listener is
@@ -203,14 +215,43 @@ async function sendToOffscreen(message, tries = 30) {
   );
 }
 
+// Recover posts whose thumbnail download failed on a prior run (status
+// "needs_thumb"): re-download, and on success flip them to "pending" so they
+// get classified. Bounded so a permanently-dead URL eventually gives up.
+async function recoverThumbnails() {
+  const need = await getPostsByStatus("needs_thumb");
+  for (const p of need) {
+    if (cancelRequested) break;
+    p.thumbTries = (p.thumbTries || 0) + 1;
+    if (p.thumbnailUrl && p.thumbTries <= 3) {
+      try {
+        await putThumbnail(p.id, await fetchThumbnailBlob(p.thumbnailUrl));
+        p.status = "pending";
+      } catch (_) {}
+    } else if (p.thumbTries > 3) {
+      p.status = "done";
+      p.category = "Uncategorized";
+    }
+    await putPost(p);
+  }
+}
+
+let classifying = false;
 async function classifyPending() {
-  const pending = await getPostsByStatus("pending");
-  if (!pending.length) return;
-  await ensureOffscreen();
-  const ids = pending.map((p) => p.id);
-  // Pass settings in — the offscreen doc can't read chrome.storage itself.
-  const settings = await getSettings();
-  await sendToOffscreen({ type: MSG.OFFSCREEN_CLASSIFY, ids, settings });
+  if (classifying) return; // never run two classify passes on the shared model
+  classifying = true;
+  try {
+    await recoverThumbnails();
+    const pending = await getPostsByStatus("pending");
+    if (!pending.length) return;
+    await ensureOffscreen();
+    const ids = pending.map((p) => p.id);
+    // Pass settings in — the offscreen doc can't read chrome.storage itself.
+    const settings = await getSettings();
+    await sendToOffscreen({ type: MSG.OFFSCREEN_CLASSIFY, ids, settings });
+  } finally {
+    classifying = false;
+  }
 }
 
 // --- sync ---------------------------------------------------------------
@@ -374,9 +415,15 @@ async function runSync({ limit } = {}) {
         if (cancelRequested || (limit && stored >= limit)) break;
         if (!it || !it.id || seen.has(it.id)) continue;
         seen.add(it.id);
-        if (await getPost(it.id)) continue; // already have it -> keep classification
+        // Skip only when we already have BOTH the record and its thumbnail — a
+        // prior thumbnail failure must remain re-fetchable, not permanently skipped.
+        if ((await getPost(it.id)) && (await getThumbnail(it.id))) continue;
         if (it.thumbnailUrl) {
-          try { await putThumbnail(it.id, await fetchThumbnailBlob(it.thumbnailUrl)); } catch (_) {}
+          try {
+            await putThumbnail(it.id, await fetchThumbnailBlob(it.thumbnailUrl));
+          } catch (_) {
+            it.status = "needs_thumb"; // retryable, not a permanent Uncategorized
+          }
         }
         await putPost(it);
         stored++; n++;
@@ -500,14 +547,25 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     case MSG.RECLASSIFY_ALL:
       (async () => {
-        const all = await getPostsByStatus("done");
-        for (const p of all) {
-          if (p.manualOverride) continue;
-          p.status = "pending";
-          await putPost(p);
+        try {
+          if (syncing || classifying) {
+            sendResponse({ ok: false, error: "Busy — a sync/classify is already running." });
+            return;
+          }
+          // Re-queue done + previously-errored posts (skip manual overrides).
+          for (const status of ["done", "error"]) {
+            for (const p of await getPostsByStatus(status)) {
+              if (p.manualOverride) continue;
+              p.status = "pending";
+              await putPost(p);
+            }
+          }
+          await classifyPending();
+          sendResponse({ ok: true });
+        } catch (e) {
+          broadcast({ type: MSG.ERROR, where: "reclassify", message: String(e.message || e) });
+          sendResponse({ ok: false, error: String(e.message || e) });
         }
-        await classifyPending();
-        sendResponse({ ok: true });
       })();
       return true;
 
