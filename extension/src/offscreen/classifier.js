@@ -10,7 +10,8 @@ import { TAG_VOCAB, extractCaptionKeywords } from "../lib/tags.js";
 import { getPost, putPost, getThumbnail } from "../lib/db.js";
 
 let T = null; // transformers.js module
-let model = null;
+let textModel = null;
+let visionModel = null;
 let processor = null;
 let tokenizer = null;
 let labelCache = { key: null, names: [], vectors: [] };
@@ -39,9 +40,13 @@ async function ensureModel(modelId) {
   if (model) return;
   const t = await loadTransformers();
   broadcast({ type: MSG.PROGRESS, phase: "model", message: "Loading CLIP model (first run downloads ~90 MB)…" });
-  model = await t.CLIPModel.from_pretrained(modelId, { quantized: true });
-  processor = await t.AutoProcessor.from_pretrained(modelId);
+  // transformers.js uses the projection sub-models (NOT CLIPModel.get_*_features,
+  // which is the Python API and doesn't exist here).
+  const opts = { quantized: true };
   tokenizer = await t.AutoTokenizer.from_pretrained(modelId);
+  processor = await t.AutoProcessor.from_pretrained(modelId);
+  textModel = await t.CLIPTextModelWithProjection.from_pretrained(modelId, opts);
+  visionModel = await t.CLIPVisionModelWithProjection.from_pretrained(modelId, opts);
 }
 
 function l2normalize(arr) {
@@ -70,8 +75,8 @@ function softmax(scores, temp = 100) {
 // Encode a batch of strings -> array of normalized Float32Array embeddings.
 async function encodeTexts(texts) {
   const inputs = tokenizer(texts, { padding: true, truncation: true });
-  const out = await model.get_text_features(inputs);
-  const tensor = out.text_embeds || out; // tolerate either shape
+  const out = await textModel(inputs);
+  const tensor = out.text_embeds || out.pooler_output || out;
   const data = tensor.data;
   const [n, d] = tensor.dims;
   const vecs = [];
@@ -84,8 +89,8 @@ async function encodeTexts(texts) {
 async function encodeImage(blob) {
   const image = await T.RawImage.fromBlob(blob);
   const inputs = await processor(image);
-  const out = await model.get_image_features(inputs);
-  const tensor = out.image_embeds || out;
+  const out = await visionModel(inputs);
+  const tensor = out.image_embeds || out.pooler_output || out;
   return l2normalize(tensor.data);
 }
 
@@ -157,6 +162,7 @@ async function classifyIds(ids) {
   const tags = await ensureTagEmbeddings();
 
   let done = 0;
+  let firstErrorShown = false;
   for (const id of ids) {
     try {
       const post = await getPost(id);
@@ -208,6 +214,12 @@ async function classifyIds(ids) {
       post.status = "done";
       await putPost(post);
     } catch (e) {
+      // Surface the FIRST failure loudly — otherwise a code/model bug just
+      // shows up as "everything Uncategorized" with no explanation.
+      if (!firstErrorShown) {
+        firstErrorShown = true;
+        broadcast({ type: MSG.ERROR, where: "classify", message: String((e && e.message) || e) });
+      }
       const post = await getPost(id);
       if (post) {
         post.status = "done";
