@@ -25,6 +25,7 @@ const TAG_FLOOR = 0.2; // min cosine for a keyword tag (embed engine)
 let T = null;
 let engine = null; // "embed" | "pipeline"
 let emb = null; // { tokenizer, processor, textModel, visionModel }
+let embedModelId = null; // which model the embed engine actually committed to
 let pipe = null;
 let cache = { key: null }; // prototypes/tag embeddings or pipeline labels, keyed by categories JSON
 
@@ -85,18 +86,67 @@ async function encodeImage(image) {
   return l2(tensor.data);
 }
 
+// A model known to ship separate text_model/vision_model ONNX exports that the
+// `…WithProjection` classes can load as independent graphs (the configured
+// default, patch32, ships only a merged graph → "Missing input_ids" on the
+// vision self-test, forcing the slow pipeline fallback).
+const SPLIT_FALLBACK_MODEL = "Xenova/clip-vit-base-patch16";
+
+// Build a self-encoding CLIP two different ways so we can encode the IMAGE once
+// and reuse cached TEXT embeddings (the ~10x win). Returns { textModel, visionModel }
+// as async callables compatible with encodeTexts/encodeImage (which read
+// out.text_embeds/out.image_embeds, else fall through to the tensor itself).
+async function buildEmbedModels(t, modelId, mode, opts) {
+  if (mode === "split") {
+    const textModel = await t.CLIPTextModelWithProjection.from_pretrained(modelId, opts);
+    const visionModel = await t.CLIPVisionModelWithProjection.from_pretrained(modelId, opts);
+    return { textModel, visionModel };
+  }
+  // "features": one merged CLIPModel exposing get_text_features/get_image_features,
+  // which run the two towers independently (works even when the split exports are absent).
+  const m = await t.CLIPModel.from_pretrained(modelId, opts);
+  if (typeof m.get_text_features !== "function" || typeof m.get_image_features !== "function") {
+    throw new Error("CLIPModel exposes no get_text_features/get_image_features");
+  }
+  return {
+    textModel: (inputs) => m.get_text_features(inputs),
+    visionModel: (inputs) => m.get_image_features(inputs),
+  };
+}
+
 async function initEmbed(modelId) {
   const t = await loadTransformers();
   broadcast({ type: MSG.PROGRESS, phase: "model", message: "Loading CLIP model (first run downloads ~90 MB)…" });
   const opts = { quantized: true };
-  const tokenizer = await t.AutoTokenizer.from_pretrained(modelId);
-  const processor = await t.AutoProcessor.from_pretrained(modelId);
-  const textModel = await t.CLIPTextModelWithProjection.from_pretrained(modelId, opts);
-  const visionModel = await t.CLIPVisionModelWithProjection.from_pretrained(modelId, opts);
-  emb = { tokenizer, processor, textModel, visionModel };
-  // Self-test the vision path (this is what threw "Missing input_ids" before).
+  // Try strategies cheapest-first; commit to the first that passes BOTH self-tests.
+  // Each is isolated so a throw (e.g. the historic "Missing input_ids") just moves on.
+  const attempts = [
+    { label: `split:${modelId}`, model: modelId, mode: "split" },
+    { label: `features:${modelId}`, model: modelId, mode: "features" },
+    { label: `split:${SPLIT_FALLBACK_MODEL}`, model: SPLIT_FALLBACK_MODEL, mode: "split" },
+  ];
   const test = new t.RawImage(new Uint8ClampedArray(4 * 4 * 3), 4, 4, 3);
-  await encodeImage(test);
+  let lastErr = null;
+  for (const a of attempts) {
+    try {
+      const tokenizer = await t.AutoTokenizer.from_pretrained(a.model);
+      const processor = await t.AutoProcessor.from_pretrained(a.model);
+      const { textModel, visionModel } = await buildEmbedModels(t, a.model, a.mode, opts);
+      emb = { tokenizer, processor, textModel, visionModel };
+      embedModelId = a.model;
+      // Self-test BOTH paths — the vision path is what historically threw, but the
+      // text path must work too since classification blends image + caption.
+      await encodeImage(test);
+      await encodeTexts(["a photo of a cat"]);
+      addLog("info", `classifier: embed self-test OK via ${a.label}`);
+      return;
+    } catch (e) {
+      emb = null;
+      lastErr = e;
+      addLog("info", `classifier: embed attempt ${a.label} failed — ${(e && e.message) || e}`);
+    }
+  }
+  throw lastErr || new Error("no embed strategy passed self-test");
 }
 
 async function buildEmbedPrototypes(categories) {
@@ -188,7 +238,7 @@ async function ensureEngine(modelId) {
   try {
     await initEmbed(modelId);
     engine = "embed";
-    addLog("info", "classifier: embedding path (fast, caption-blend, phrases)");
+    addLog("info", `classifier: embedding path (fast, caption-blend, phrases) — model ${embedModelId}`);
   } catch (e) {
     addLog("error", "embedding path unavailable, using pipeline: " + ((e && e.message) || e));
     await initPipeline(modelId);

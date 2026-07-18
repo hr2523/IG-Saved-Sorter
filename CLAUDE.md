@@ -10,7 +10,7 @@ with CLIP. Two deliverables live in this repo:
   user's saved posts *in their logged-in browser* (no login/2FA), classifies in-browser
   with transformers.js CLIP, and shows a gallery. **All recent work is here.**
 
-Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.8.3**
+Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.8.4**
 (see `extension/manifest.json`). GitHub repo scope: `hr2523/ig-saved-sorter`.
 
 ---
@@ -85,11 +85,23 @@ its thumbnail blob exist; `needs_thumb`/`error` are retryable.
 ### The "Missing input_ids" history (important for the classifier)
 The embed engine uses `CLIPTextModelWithProjection`/`CLIPVisionModelWithProjection`. An
 earlier attempt at this exact API threw `An error occurred during model execution: "Missing
-the following inputs: input_ids"` and was replaced by the pipeline. We don't fully know why
-it failed (couldn't reproduce headless). So the embed engine is **self-tested at load** and
-**falls back to the pipeline** if it throws — categorization can only improve or stay
-working. **Check the log line** `classifier: embedding path` vs `pipeline path` to know
-which ran on the user's machine. If embed keeps failing, that's the thing to debug next.
+the following inputs: input_ids"` and was replaced by the pipeline. **Root cause (v0.8.4):**
+the default model `Xenova/clip-vit-base-patch32` ships **only a merged CLIP graph** (both
+towers), so `CLIPVisionModelWithProjection` can't load a vision-only session — encoding an
+image alone still demands `input_ids`, hence the throw. The pipeline works because it feeds
+`input_ids`+`pixel_values` together to that same merged graph.
+
+**v0.8.4 fix — `initEmbed` now self-selects a working embed strategy** (in `classifier.js`),
+trying each and self-testing BOTH the vision and text paths before committing:
+1. `split:<configured model>` — `…WithProjection` on patch32 (today's path)
+2. `features:<configured model>` — merged `CLIPModel` via `get_image_features`/`get_text_features`
+3. `split:Xenova/clip-vit-base-patch16` — a model that DOES ship separate text/vision ONNX exports
+…else fall back to the pipeline (unchanged). Each candidate is isolated, so a throw just moves
+on — the fast path can only be gained, never regress. **Check the logs** for
+`embed self-test OK via <label>` (which strategy won) or `embed attempt <label> failed — …`,
+and `classifier: embedding path … — model <id>` vs `classifier: pipeline path`. Since this
+can't be reproduced in-sandbox (HF is 403), the winning strategy is confirmed from the user's
+Logs panel. If ALL embed strategies fail, that's the next thing to debug.
 
 ---
 
@@ -105,6 +117,13 @@ Done recently (from an adversarial code review — 21 verified findings):
 - **v0.8.2 Phase C** — categorization rewrite: real phrases + prompt ensembling +
   image/caption blend + ~10× fewer text encodes, with the pipeline fallback.
 - **v0.8.3** — fix missing `getThumbnail` import.
+- **v0.8.4** — unblock the fast embed path: `initEmbed` self-selects a working CLIP strategy
+  (split→`get_*_features`→patch16 split), self-testing vision+text before committing, so the
+  ~10× fast path is used whenever any strategy works instead of always falling to the slow
+  pipeline. Root-caused the "Missing input_ids" throw to patch32 shipping only a merged graph.
+  (Background-execution question that prompted this: closing the popup / switching tabs does
+  NOT throttle classify — it's a pure `await`/WASM loop in the offscreen doc; the felt "lag"
+  was the slow pipeline path, which this targets.)
 
 ### Not yet done (remaining verified review findings, lower priority)
 - Gallery re-reads all posts + re-decodes all thumbnails every 1.5s during classify
