@@ -30,7 +30,17 @@ export function send(message) {
 }
 
 // Broadcast progress to any listening UI; ignore "no receiver" errors.
+// Also mirror errors + phase changes into the shared log so we can see them.
 export function broadcast(message) {
+  try {
+    if (message && message.type === MSG.ERROR) {
+      import("./log.js").then((l) => l.addLog("error", `${message.where}: ${message.message}`));
+    } else if (message && message.type === MSG.DONE) {
+      import("./log.js").then((l) => l.addLog("info", `done — ${message.total} post(s)`));
+    } else if (message && message.type === MSG.PROGRESS && message.message) {
+      import("./log.js").then((l) => l.addLog("info", message.message));
+    }
+  } catch (_) {}
   try {
     chrome.runtime.sendMessage(message).catch(() => {});
   } catch (_) {

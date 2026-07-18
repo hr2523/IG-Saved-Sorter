@@ -5,6 +5,10 @@
 
 import { MSG, broadcast } from "../lib/messaging.js";
 import { DEFAULT_SETTINGS } from "../lib/settings.js";
+import { addLog } from "../lib/log.js";
+
+self.addEventListener("unhandledrejection", (e) => addLog("error", "offscreen: " + ((e.reason && e.reason.message) || e.reason)));
+self.addEventListener("error", (e) => addLog("error", "offscreen: " + (e.message || e)));
 import { expandPrompts, UNCATEGORIZED } from "../lib/categories.js";
 import { TAG_VOCAB, extractCaptionKeywords } from "../lib/tags.js";
 import { getPost, putPost, getThumbnail } from "../lib/db.js";
@@ -37,7 +41,7 @@ async function loadTransformers() {
 }
 
 async function ensureModel(modelId) {
-  if (model) return;
+  if (visionModel) return;
   const t = await loadTransformers();
   broadcast({ type: MSG.PROGRESS, phase: "model", message: "Loading CLIP model (first run downloads ~90 MB)…" });
   // transformers.js uses the projection sub-models (NOT CLIPModel.get_*_features,

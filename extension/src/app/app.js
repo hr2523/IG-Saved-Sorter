@@ -2,6 +2,7 @@ import { MSG } from "../lib/messaging.js";
 import { getSettings, saveSettings } from "../lib/settings.js";
 import { UNCATEGORIZED } from "../lib/categories.js";
 import { getAllPosts, getThumbnail, putPost, clearAll } from "../lib/db.js";
+import { getLogs, clearLogs } from "../lib/log.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -173,7 +174,26 @@ chrome.runtime.onMessage.addListener((m) => {
 $("settingsBtn").onclick = () => openSettings();
 $("closeSettings").onclick = () => ($("drawer").hidden = true);
 
+async function renderLogs() {
+  const logs = await getLogs();
+  const el = $("logs");
+  if (!logs.length) { el.textContent = "(no logs yet)"; return; }
+  el.innerHTML = logs
+    .map((l) => `<div class="${l.level === "error" ? "e" : ""}">${escapeHtml(l.t)}  ${escapeHtml(l.msg)}</div>`)
+    .join("");
+  el.scrollTop = el.scrollHeight;
+}
+$("copyLogs").onclick = async () => {
+  const logs = await getLogs();
+  const text = logs.map((l) => `${l.t} [${l.level}] ${l.msg}`).join("\n");
+  try { await navigator.clipboard.writeText(text); $("settingsMsg").textContent = "Logs copied."; }
+  catch (_) { $("settingsMsg").textContent = "Copy failed — select the text manually."; }
+};
+$("refreshLogs").onclick = () => renderLogs();
+$("clearLogs").onclick = async () => { await clearLogs(); renderLogs(); };
+
 async function openSettings() {
+  renderLogs();
   const s = STATE.settings || (await getSettings());
   $("cardRadius").value = s.cardRadius; $("crVal").textContent = s.cardRadius;
   $("cardMinWidth").value = s.cardMinWidth; $("cmVal").textContent = s.cardMinWidth;

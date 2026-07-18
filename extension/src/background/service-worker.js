@@ -5,7 +5,11 @@
 
 import { MSG, broadcast } from "../lib/messaging.js";
 import { getSettings } from "../lib/settings.js";
+import { addLog } from "../lib/log.js";
 import { normalizePage, normalizeCollections } from "../lib/ig-normalize.js";
+
+self.addEventListener("unhandledrejection", (e) => addLog("error", "sw: " + ((e.reason && e.reason.message) || e.reason)));
+self.addEventListener("error", (e) => addLog("error", "sw: " + (e.message || e)));
 import {
   putPost,
   getPost,
