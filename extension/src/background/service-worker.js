@@ -14,6 +14,7 @@ import {
   putPost,
   getPost,
   putThumbnail,
+  getThumbnail,
   getPostsByStatus,
   clearAll,
   countPosts,
