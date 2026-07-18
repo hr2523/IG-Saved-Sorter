@@ -1,9 +1,14 @@
 {
   "manifest_version": 3,
   "name": "IG Saved Sorter",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Organize your Instagram saved posts into topic categories, in your browser. Reads your own saved posts via your logged-in session; classifies them locally with CLIP.",
-  "permissions": ["storage", "offscreen", "tabs", "scripting"],
+  "permissions": [
+    "storage",
+    "offscreen",
+    "tabs",
+    "scripting"
+  ],
   "host_permissions": [
     "https://www.instagram.com/*",
     "https://i.instagram.com/*",
@@ -16,14 +21,22 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.instagram.com/*"],
-      "js": ["src/content/interceptor.js"],
+      "matches": [
+        "https://www.instagram.com/*"
+      ],
+      "js": [
+        "src/content/interceptor.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["https://www.instagram.com/*"],
-      "js": ["src/content/relay.js"],
+      "matches": [
+        "https://www.instagram.com/*"
+      ],
+      "js": [
+        "src/content/relay.js"
+      ],
       "run_at": "document_start",
       "world": "ISOLATED"
     }
@@ -39,7 +52,9 @@
         "src/wasm/*",
         "src/offscreen/offscreen.html"
       ],
-      "matches": ["https://www.instagram.com/*"]
+      "matches": [
+        "https://www.instagram.com/*"
+      ]
     }
   ],
   "content_security_policy": {

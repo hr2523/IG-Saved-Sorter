@@ -4,7 +4,7 @@
 // back to IndexedDB, and broadcasts PROGRESS as it goes.
 
 import { MSG, broadcast } from "../lib/messaging.js";
-import { getSettings } from "../lib/settings.js";
+import { DEFAULT_SETTINGS } from "../lib/settings.js";
 import { expandPrompts, UNCATEGORIZED } from "../lib/categories.js";
 import { TAG_VOCAB, extractCaptionKeywords } from "../lib/tags.js";
 import { getPost, putPost, getThumbnail } from "../lib/db.js";
@@ -155,8 +155,10 @@ function buildKeywords(imgVec, tags, caption, maxOut = 6) {
   return out.slice(0, maxOut);
 }
 
-async function classifyIds(ids) {
-  const settings = await getSettings();
+async function classifyIds(ids, settingsIn) {
+  // Settings are passed in from the service worker — offscreen documents can't
+  // access chrome.storage (only chrome.runtime).
+  const settings = { ...DEFAULT_SETTINGS, ...(settingsIn || {}) };
   await ensureModel(settings.model);
   const labels = await ensureLabelEmbeddings(settings.categories);
   const tags = await ensureTagEmbeddings();
@@ -237,7 +239,7 @@ async function classifyIds(ids) {
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.type !== MSG.OFFSCREEN_CLASSIFY) return;
-  classifyIds(msg.ids || [])
+  classifyIds(msg.ids || [], msg.settings)
     .then(() => sendResponse({ ok: true }))
     .catch((e) => {
       broadcast({ type: MSG.ERROR, where: "classify", message: String(e.message || e) });

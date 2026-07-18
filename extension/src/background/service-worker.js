@@ -204,9 +204,9 @@ async function classifyPending() {
   if (!pending.length) return;
   await ensureOffscreen();
   const ids = pending.map((p) => p.id);
-  // Offscreen reads posts+thumbnails+settings from storage itself and writes
-  // results back to IndexedDB, broadcasting PROGRESS as it goes.
-  await sendToOffscreen({ type: MSG.OFFSCREEN_CLASSIFY, ids });
+  // Pass settings in — the offscreen doc can't read chrome.storage itself.
+  const settings = await getSettings();
+  await sendToOffscreen({ type: MSG.OFFSCREEN_CLASSIFY, ids, settings });
 }
 
 // --- sync ---------------------------------------------------------------
