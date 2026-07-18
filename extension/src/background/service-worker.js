@@ -351,8 +351,8 @@ async function waitFor(pred, ms) {
   return pred();
 }
 
-// Replay the captured request with a new pagination cursor, in the page (so
-// cookies + tokens apply). Returns parsed JSON or {__error}.
+// Replay the captured request in the page (cookies + tokens apply). An empty
+// cursor means "first page". Returns {__json} | {__status,__retryAfter} | {__error}.
 async function replayInPage(tabId, template, cursor) {
   const [res] = await chrome.scripting.executeScript({
     target: { tabId }, world: "MAIN",
@@ -361,38 +361,74 @@ async function replayInPage(tabId, template, cursor) {
       try {
         let { method = "GET", url, headers = {}, body } = tpl;
         method = method.toUpperCase();
-        // Drop headers the browser must set itself.
         const clean = {};
         for (const k in headers) {
           if (!/^(cookie|host|content-length|user-agent|referer|origin|accept-encoding)$/i.test(k)) clean[k] = headers[k];
         }
         if (method === "GET") {
           const u = new URL(url);
-          u.searchParams.set("max_id", cur);
+          if (cur) u.searchParams.set("max_id", cur);
+          else u.searchParams.delete("max_id"); // first page
           url = u.toString();
         } else if (body) {
           try {
             const params = new URLSearchParams(body);
             if (params.has("variables")) {
               const v = JSON.parse(params.get("variables"));
-              ["after", "max_id", "end_cursor", "cursor"].forEach((k) => { if (k in v) v[k] = cur; });
-              if (!("after" in v) && !("max_id" in v)) v.after = cur;
+              ["after", "max_id", "end_cursor", "cursor"].forEach((k) => { if (k in v) v[k] = cur || null; });
+              if (cur && !("after" in v) && !("max_id" in v)) v.after = cur;
               params.set("variables", JSON.stringify(v));
               body = params.toString();
             } else if (/max_id=/.test(body)) {
-              body = body.replace(/(max_id=)[^&]*/, "$1" + encodeURIComponent(cur));
+              body = body.replace(/(max_id=)[^&]*/, "$1" + encodeURIComponent(cur || ""));
             }
           } catch (_) {
-            try { const j = JSON.parse(body); if (j.variables) { j.variables.after = cur; body = JSON.stringify(j); } } catch (_) {}
+            try { const j = JSON.parse(body); if (j.variables) { j.variables.after = cur || null; body = JSON.stringify(j); } } catch (_) {}
           }
         }
         const r = await fetch(url, { method, headers: clean, body: method === "GET" ? undefined : body, credentials: "include" });
-        if (!r.ok) return { __error: "HTTP " + r.status };
-        return await r.json();
+        if (!r.ok) return { __status: r.status, __retryAfter: r.headers.get("Retry-After") };
+        return { __json: await r.json() };
       } catch (e) { return { __error: String((e && e.message) || e) }; }
     },
   });
   return (res && res.result) || { __error: "no result" };
+}
+
+// Replay one page with retry/backoff on transient errors. Returns parsed JSON
+// or null (permanent failure / exhausted).
+async function replayWithRetry(tabId, template, cursor) {
+  for (let attempt = 0; attempt < 5 && !cancelRequested; attempt++) {
+    const res = await replayInPage(tabId, template, cursor);
+    if (res && res.__json !== undefined) return res.__json;
+    const status = res && res.__status;
+    const transient = !status || status === 429 || (status >= 500 && status < 600);
+    if (!transient) { addLog("error", `replay hard-stop HTTP ${status}`); return null; }
+    const ra = res && res.__retryAfter ? parseInt(res.__retryAfter, 10) * 1000 : 0;
+    const wait = Math.min(ra || PAGE_DELAY_MS * Math.pow(2, attempt), 60000);
+    addLog("info", `replay throttled (${status || "network"}), backoff ${Math.round(wait / 1000)}s (try ${attempt + 1}/5)`);
+    await sleep(wait);
+  }
+  return null;
+}
+
+// --- resume state (per saved-page) --------------------------------------
+function savedKey(url) {
+  const m = String(url || "").match(/\/saved\/([^?#]*)/);
+  return (m && m[1]) || "all";
+}
+async function getResume(key) {
+  const r = await chrome.storage.local.get("igss_resume");
+  return (r.igss_resume && r.igss_resume[key]) || { frontier: null, complete: false };
+}
+async function saveResume(key, patch) {
+  const r = await chrome.storage.local.get("igss_resume");
+  const map = r.igss_resume || {};
+  map[key] = { ...(map[key] || {}), ...patch };
+  await chrome.storage.local.set({ igss_resume: map });
+}
+async function clearResume() {
+  await chrome.storage.local.remove("igss_resume");
 }
 
 async function runSync({ limit } = {}) {
@@ -444,34 +480,50 @@ async function runSync({ limit } = {}) {
       return newTotal;
     }
 
-    // 1) Trigger Instagram's own request, then read what the interceptor caught.
+    const savedTab = await chrome.tabs.get(tabId).catch(() => null);
+    const key = savedKey(savedTab && savedTab.url);
+    const resume = await getResume(key);
+    // Incremental (fast, stop-when-nothing-new) only once we've fully crawled
+    // this feed before; otherwise do a full crawl to the true end.
+    const incremental = resume.complete === true;
+
+    // 1) Trigger Instagram's own request so the interceptor grabs the template.
     await nudgeScroll(tabId);
     await waitFor(() => capture.template || capture.pages.length, 9000);
-    let hadNew = (await drainCaptured()) > 0;
-    addLog("info", `fetch: captured template=${!!capture.template}, cursor=${lastCursor ? "yes" : "no"}, firstBatch=${stored}`);
+    await drainCaptured();
+    addLog("info", `fetch: template=${!!capture.template}, mode=${incremental ? "incremental" : "full-crawl"}`);
 
-    // 2) Primary: replay the captured request with cursors (no scrolling).
-    if (capture.template && lastCursor) {
+    let partial = false;
+    // 2) Primary: replay the captured request from page 1 with cursors (no scroll).
+    if (capture.template) {
       addLog("info", "fetch: using API replay (no scroll)");
-      let cursor = lastCursor, pages = 0, stale = 0;
-      while (cursor && pages < MAX_PAGES && !cancelRequested && !(limit && stored >= limit)) {
-        const raw = await replayInPage(tabId, capture.template, cursor);
-        if (!raw || raw.__error) { addLog("error", `replay page ${pages + 1} failed: ${raw && raw.__error}`); break; }
+      let cursor = "", pages = 0, stale = 0, reachedEnd = false;
+      while (pages < MAX_PAGES && !cancelRequested && !(limit && stored >= limit)) {
+        const raw = await replayWithRetry(tabId, capture.template, cursor);
+        if (!raw) { partial = true; addLog("error", `replay stopped at page ${pages + 1}`); break; }
         const page = normalizePage(raw);
         const n = await processItems(page.items);
         await drainCaptured();
         pages++;
+        if (page.nextMaxId) { lastCursor = page.nextMaxId; await saveResume(key, { frontier: lastCursor }); }
         addLog("info", `replay page ${pages}: +${n} new, total ${stored}, cursor=${page.nextMaxId ? "yes" : "no"}`);
-        if (n === 0) { if (++stale >= 2) break; } else stale = 0; // early-exit: nothing new
-        if (!page.moreAvailable && !page.nextMaxId) break;
-        cursor = page.nextMaxId || lastCursor;
-        await sleep(500);
+        if (!page.moreAvailable && !page.nextMaxId) { reachedEnd = true; break; } // true end of feed
+        // Only stop on "nothing new" in incremental mode; a full crawl must walk
+        // through the already-stored top region to reach the un-fetched tail.
+        if (incremental && page.items.length > 0 && n === 0) { if (++stale >= 2) break; } else stale = 0;
+        if (!page.nextMaxId) { partial = true; break; } // can't advance
+        cursor = page.nextMaxId;
+        await sleep(PAGE_DELAY_MS);
       }
-      addLog("info", `fetch: replay finished (${pages} pages, ${stored} stored)`);
+      if (reachedEnd) await saveResume(key, { complete: true });
+      addLog("info", `fetch: replay finished (${pages} pages, ${stored} new, ${reachedEnd ? "complete" : "partial"})`);
     } else {
       // 3) Fallbacks: robust scroll (harvesting intercepted responses), then DOM scrape.
       addLog("info", "fetch: NO replay (no captured request) — falling back to scrolling");
       await scrollInterceptFallback(tabId, processItems, drainCaptured);
+    }
+    if (partial && !cancelRequested) {
+      broadcast({ type: MSG.PROGRESS, phase: "fetch", done: seen.size, total: null, message: `Partial fetch (${seen.size} so far) — run Sync again to resume.` });
     }
 
     broadcast({ type: MSG.PROGRESS, phase: "classify", done: 0, total: seen.size, message: "Classifying…" });
@@ -581,7 +633,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       return true;
 
     case MSG.CLEAR_DATA:
-      clearAll().then(() => sendResponse({ ok: true }));
+      Promise.all([clearAll(), clearResume()]).then(() => sendResponse({ ok: true }));
       return true;
   }
 });

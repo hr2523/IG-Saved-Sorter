@@ -40,7 +40,9 @@ export function normalizeMedia(media) {
     media.accessibility_caption ||
     "";
   return {
-    id: String(media.pk || media.id || code),
+    // Key on the shortcode: it's the only id the DOM-scrape fallback can produce,
+    // so keying on it keeps dedupe consistent across all fetch paths.
+    id: String(code || media.pk || media.id),
     code,
     caption: typeof caption === "string" ? caption : "",
     thumbnailUrl: bestThumbnailUrl(media),
