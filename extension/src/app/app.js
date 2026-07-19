@@ -207,7 +207,7 @@ chrome.runtime.onMessage.addListener((m) => {
     $("reclassify").disabled = false;
     $("bar").style.width = "100%";
     setMsg(m.fetchComplete === false
-      ? `Fetched ${m.fetched ?? m.total} — may be incomplete. Click Sync to resume, or “Force full re-sync” in Settings.`
+      ? `Fetched ${m.fetched ?? m.total} — may be incomplete. Click Sync again to continue (don't Clear); it resumes where it stopped.`
       : `Done — ${m.total} post(s).`);
     load();
   } else if (m.type === MSG.ERROR) {

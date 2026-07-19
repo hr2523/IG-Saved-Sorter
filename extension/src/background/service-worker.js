@@ -33,9 +33,12 @@ function resetCapture() {
 }
 
 const MAX_PAGES = 5000; // very generous safety backstop (~100k+ posts)
-const PAGE_DELAY_MS = 900; // polite throttle between pages
+const PAGE_DELAY_MS = 1400; // polite base throttle between pages (jittered at call sites)
+const REPLAY_TRIES = 8; // per-page throttle retries before a cool-down/resume
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Jittered inter-page delay so we don't hammer IG on a fixed cadence (trips rate limits).
+const pageDelay = () => PAGE_DELAY_MS + Math.floor(Math.random() * 800);
 
 // --- instagram tab ------------------------------------------------------
 async function getInstagramTab() {
@@ -406,15 +409,15 @@ async function replayInPage(tabId, template, cursor) {
 // Replay one page with retry/backoff on transient errors. Returns parsed JSON
 // or null (permanent failure / exhausted).
 async function replayWithRetry(tabId, template, cursor) {
-  for (let attempt = 0; attempt < 5 && !cancelRequested; attempt++) {
+  for (let attempt = 0; attempt < REPLAY_TRIES && !cancelRequested; attempt++) {
     const res = await replayInPage(tabId, template, cursor);
     if (res && res.__json !== undefined) return res.__json;
     const status = res && res.__status;
     const transient = !status || status === 429 || (status >= 500 && status < 600);
     if (!transient) { addLog("error", `replay hard-stop HTTP ${status}`); return null; }
     const ra = res && res.__retryAfter ? parseInt(res.__retryAfter, 10) * 1000 : 0;
-    const wait = Math.min(ra || PAGE_DELAY_MS * Math.pow(2, attempt), 60000);
-    addLog("info", `replay throttled (${status || "network"}), backoff ${Math.round(wait / 1000)}s (try ${attempt + 1}/5)`);
+    const wait = Math.min(ra || PAGE_DELAY_MS * Math.pow(2, attempt), 120000);
+    addLog("info", `replay throttled (${status || "network"}), backoff ${Math.round(wait / 1000)}s (try ${attempt + 1}/${REPLAY_TRIES})`);
     await sleep(wait);
   }
   return null;
@@ -510,27 +513,70 @@ async function runSync({ limit } = {}) {
     }
     addLog("info", `fetch: template=${!!capture.template}, mode=${incremental ? "incremental" : "full-crawl"}`);
 
+    // If nudging didn't get IG to fire its request, reload the tab once — a fresh
+    // page load reliably issues the first saved-feed request — then nudge again, so
+    // we stay on the strong replay path instead of the weak scroll fallback.
+    if (!capture.template && !cancelRequested) {
+      addLog("info", "fetch: no capture — reloading the saved tab to trigger IG's request");
+      try {
+        await chrome.tabs.reload(tabId);
+        await waitForTabComplete(tabId);
+      } catch (_) {}
+      for (let tries = 0; tries < 8 && !capture.template && !cancelRequested; tries++) {
+        await nudgeScroll(tabId);
+        await waitFor(() => capture.template || capture.pages.length, 4000);
+        await drainCaptured();
+      }
+      addLog("info", `fetch: after reload template=${!!capture.template}`);
+    }
+
     let partial = false, reachedEnd = false;
     // 2) Primary: replay the captured request with cursors (no scroll).
     if (capture.template) {
       addLog("info", "fetch: using API replay (no scroll)");
-      let cursor = startCursor, pages = 0, stale = 0;
+      let cursor = startCursor, pages = 0, stale = 0, cools = 0, cursorTries = 0;
+      const MAX_COOL = 3, MAX_CURSOR_TRY = 2;
       while (pages < MAX_PAGES && !cancelRequested && !(limit && stored >= limit)) {
         const raw = await replayWithRetry(tabId, capture.template, cursor);
-        if (!raw) { partial = true; addLog("error", `replay stopped at page ${pages + 1}`); break; }
+        if (!raw) {
+          // Throttle exhausted this batch of retries. Cool down longer and resume
+          // from the SAME cursor a few more times before giving up — turns a
+          // rate-limited partial into a complete within one run.
+          if (cools < MAX_COOL && !cancelRequested) {
+            cools++;
+            const cool = 60000 + Math.floor(Math.random() * 30000);
+            addLog("info", `replay cooling ${Math.round(cool / 1000)}s then resuming (${cools}/${MAX_COOL})`);
+            await sleep(cool);
+            continue;
+          }
+          partial = true; addLog("error", `replay stopped at page ${pages + 1} (throttled)`); break;
+        }
+        cools = 0; // a successful fetch refills the cool-down budget (3 *consecutive* stalls)
         const page = normalizePage(raw);
         const n = await processItems(page.items);
         await drainCaptured();
         pages++;
         if (page.nextMaxId) { lastCursor = page.nextMaxId; await saveResume(key, { frontier: lastCursor }); }
         addLog("info", `replay page ${pages}: +${n} new, total ${stored}, cursor=${page.nextMaxId ? "yes" : "no"}`);
-        if (!page.moreAvailable && !page.nextMaxId) { reachedEnd = true; break; } // true end of feed
-        // Only stop on "nothing new" in incremental mode; a full crawl must walk
-        // through the already-stored top region to reach the un-fetched tail.
-        if (incremental && page.items.length > 0 && n === 0) { if (++stale >= 2) break; } else stale = 0;
-        if (!page.nextMaxId) { partial = true; break; } // can't advance
-        cursor = page.nextMaxId;
-        await sleep(PAGE_DELAY_MS);
+        if (page.nextMaxId) {
+          cursorTries = 0;
+          // Incremental (already-fully-crawled) runs stop once the top yields nothing new.
+          if (incremental && page.items.length > 0 && n === 0) { if (++stale >= 2) break; } else stale = 0;
+          cursor = page.nextMaxId;
+          await sleep(pageDelay());
+          continue;
+        }
+        // No cursor on this page. IG sometimes drops next_max_id transiently while
+        // more_available is still true — retry the SAME cursor a couple of times
+        // before concluding we've hit the end.
+        if (page.moreAvailable && cursorTries < MAX_CURSOR_TRY && !cancelRequested) {
+          cursorTries++;
+          addLog("info", `replay: more_available but no cursor — retry ${cursorTries}/${MAX_CURSOR_TRY}`);
+          await sleep(pageDelay() + 2000);
+          continue;
+        }
+        if (!page.moreAvailable) reachedEnd = true; else partial = true;
+        break;
       }
       if (reachedEnd) await saveResume(key, { complete: true });
       addLog("info", `fetch: replay finished (${pages} pages, ${stored} new, ${reachedEnd ? "complete" : "partial"})`);
@@ -540,7 +586,7 @@ async function runSync({ limit } = {}) {
       await scrollInterceptFallback(tabId, processItems, drainCaptured);
     }
     if (partial && !cancelRequested) {
-      broadcast({ type: MSG.PROGRESS, phase: "fetch", done: seen.size, total: null, message: `Partial fetch (${seen.size} so far) — run Sync again to resume.` });
+      broadcast({ type: MSG.PROGRESS, phase: "fetch", done: seen.size, total: null, message: `Partial fetch (${seen.size} so far) — click Sync again to continue (don't Clear data).` });
     }
 
     broadcast({ type: MSG.PROGRESS, phase: "classify", done: 0, total: seen.size, message: "Classifying…" });
@@ -559,9 +605,9 @@ async function scrollInterceptFallback(tabId, processItems, drainCaptured) {
   let stable = 0, sawData = false;
   for (let round = 0; round < 3000 && !cancelRequested; round++) {
     await nudgeScroll(tabId);
-    await sleep(900);
+    await sleep(1200);
     const n = await drainCaptured();
-    if (n > 0) { sawData = true; stable = 0; } else if (++stable >= 4) break;
+    if (n > 0) { sawData = true; stable = 0; } else if (++stable >= 8) break;
   }
   if (sawData) return;
   // Nothing intercepted at all → DOM scrape the rendered grid.
@@ -575,7 +621,7 @@ async function scrollInterceptFallback(tabId, processItems, drainCaptured) {
       takenAt: null, status: "pending", category: null, confidence: 0, manualOverride: false,
     }));
     await processItems(items);
-    if (raw.length === prev) { if (++stable2 >= 3) break; } else stable2 = 0;
+    if (raw.length === prev) { if (++stable2 >= 6) break; } else stable2 = 0;
     prev = raw.length;
   }
 }

@@ -84,7 +84,7 @@ chrome.runtime.onMessage.addListener((m) => {
     setBusy(false);
     bar.style.width = "100%";
     setMsg(m.fetchComplete === false
-      ? `Fetched ${m.fetched ?? m.total} — may be incomplete. Sync again to resume.`
+      ? `Fetched ${m.fetched ?? m.total} — may be incomplete. Sync again to continue (don't Clear).`
       : `Done — ${m.total} post(s). Open the gallery to review.`);
     refreshCount();
   } else if (m.type === MSG.ERROR) {

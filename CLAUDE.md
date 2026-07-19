@@ -10,7 +10,7 @@ with CLIP. Two deliverables live in this repo:
   user's saved posts *in their logged-in browser* (no login/2FA), classifies in-browser
   with transformers.js CLIP, and shows a gallery. **All recent work is here.**
 
-Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.9.2**
+Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.9.3**
 (see `extension/manifest.json`). GitHub repo scope: `hr2523/ig-saved-sorter`.
 
 ---
@@ -184,6 +184,21 @@ Done recently (from an adversarial code review — 21 verified findings):
   fetch `Found N…` counter is `noLog`. Raised `MAX` to **1000**. The valuable per-page
   `replay page N … cursor=yes/no` lines are `addLog`'d directly (unaffected). This unblocks
   diagnosing the crawl cap — the fetch markers now persist through a classify pass.
+- **v0.9.3** — **crawl robustness (get the whole feed).** The crawl stopped at a *variable* point
+  (2474/2454/1197), which rules out a fixed IG cap and points to scroll-fallback or replay
+  throttling. Two-pronged, tightly-bounded fix in `service-worker.js`: **(S) guarantee replay** —
+  if the multi-nudge still captures nothing, **reload the saved tab once** (`chrome.tabs.reload` +
+  `waitForTabComplete`) and re-nudge, since a fresh load reliably fires IG's first saved-feed
+  request; plus a more patient scroll backstop (stable 4→8, 6 for DOM scrape, 1.2s waits).
+  **(T) patient replay** — jittered pacing (`PAGE_DELAY_MS` 900→1400 + `pageDelay()` random),
+  `replayWithRetry` 5→**8** tries & 120s cap, in-loop **cool-down auto-resume** (on throttle-null,
+  wait 60–90s and retry the SAME cursor up to 3 *consecutive* times, budget refilled on any
+  success), and **bounded retry-on-missing-cursor** (IG drops `next_max_id` transiently while
+  `more_available` — retry same cursor up to 2× before declaring end). Partial banners now say
+  "Sync again to continue (don't Clear)" since the frontier resume accumulates. NOTE: still needs
+  the user's 0.9.2+ fetch logs to confirm which path (replay vs scroll, complete vs partial); if
+  replay consistently hits a clean `more_available:false` at a stable point, that's IG's true
+  end-of-feed for the account and unbeatable client-side.
 
 ### Not yet done (remaining verified review findings, lower priority)
 - Gallery re-reads all posts + re-decodes all thumbnails every 1.5s during classify
