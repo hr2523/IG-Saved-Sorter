@@ -1,10 +1,12 @@
 // Tiny shared logger. Uses its own IndexedDB so it works in EVERY context
 // (service worker, offscreen doc, gallery) — offscreen can't use chrome.storage.
-// Keeps the last ~200 entries; the gallery shows + copies them.
+// Keeps the last ~1000 entries; the gallery shows + copies them. (Big enough that
+// a full crawl's per-page fetch logs survive a following classify pass — see the
+// `noLog` hint on high-frequency progress in messaging.js/classifier.js.)
 
 const DB = "igss-logs";
 const STORE = "logs";
-const MAX = 200;
+const MAX = 1000;
 
 function open() {
   return new Promise((res, rej) => {

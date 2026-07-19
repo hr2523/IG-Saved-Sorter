@@ -10,7 +10,7 @@ with CLIP. Two deliverables live in this repo:
   user's saved posts *in their logged-in browser* (no login/2FA), classifies in-browser
   with transformers.js CLIP, and shows a gallery. **All recent work is here.**
 
-Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.9.1**
+Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.9.2**
 (see `extension/manifest.json`). GitHub repo scope: `hr2523/ig-saved-sorter`.
 
 ---
@@ -176,6 +176,14 @@ Done recently (from an adversarial code review — 21 verified findings):
   show/hide (persisted in `localStorage`, mirrors the theme toggle). NOTE: if IG genuinely stops
   giving a cursor at ~2474 (`fetch: replay finished (… complete)`), that's an IG-side limit no
   client fix can beat — read the fetch logs to tell replay-vs-scroll and complete-vs-partial.
+- **v0.9.2** — **log-flood fix so fetch diagnostics survive.** The log ring buffer was `MAX=200`
+  (`log.js`) while a classify pass logged every 3 posts (~400 lines via `broadcast` mirroring
+  PROGRESS), evicting the fetch-phase lines before the user could copy them ("early log not
+  showing up"). Added a **`noLog`** hint honored by `broadcast` (`messaging.js`): classify progress
+  now updates the UI bar every 3 posts but only LOGS a milestone (~every 60 + final), and the
+  fetch `Found N…` counter is `noLog`. Raised `MAX` to **1000**. The valuable per-page
+  `replay page N … cursor=yes/no` lines are `addLog`'d directly (unaffected). This unblocks
+  diagnosing the crawl cap — the fetch markers now persist through a classify pass.
 
 ### Not yet done (remaining verified review findings, lower priority)
 - Gallery re-reads all posts + re-decodes all thumbnails every 1.5s during classify

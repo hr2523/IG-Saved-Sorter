@@ -472,7 +472,7 @@ async function runSync({ limit } = {}) {
         await putPost(it);
         stored++; n++;
       }
-      broadcast({ type: MSG.PROGRESS, phase: "fetch", done: seen.size, total: null, message: `Found ${seen.size} saved post(s)…` });
+      broadcast({ type: MSG.PROGRESS, phase: "fetch", done: seen.size, total: null, message: `Found ${seen.size} saved post(s)…`, noLog: true });
       return n;
     }
 

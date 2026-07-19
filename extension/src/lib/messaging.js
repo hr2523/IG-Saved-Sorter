@@ -39,7 +39,7 @@ export function broadcast(message) {
   try {
     if (message && message.type === MSG.ERROR) addLog("error", `${message.where}: ${message.message}`);
     else if (message && message.type === MSG.DONE) addLog("info", `done — ${message.total} post(s)`);
-    else if (message && message.type === MSG.PROGRESS && message.message) addLog("info", message.message);
+    else if (message && message.type === MSG.PROGRESS && message.message && !message.noLog) addLog("info", message.message);
   } catch (_) {}
   try {
     chrome.runtime.sendMessage(message).catch(() => {});

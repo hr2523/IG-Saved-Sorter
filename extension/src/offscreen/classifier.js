@@ -335,7 +335,9 @@ async function classifyIds(ids, settingsIn) {
     }
     done++;
     if (done % 3 === 0 || done === ids.length) {
-      broadcast({ type: MSG.PROGRESS, phase: "classify", done, total: ids.length, message: `Classified ${done}/${ids.length}` });
+      // Update the UI bar every 3, but only LOG a milestone (~every 60 + the final)
+      // so a big classify pass doesn't flood the log ring and evict the fetch logs.
+      broadcast({ type: MSG.PROGRESS, phase: "classify", done, total: ids.length, message: `Classified ${done}/${ids.length}`, noLog: !(done % 60 === 0 || done === ids.length) });
     }
   }
   if (errorCount) broadcast({ type: MSG.ERROR, where: "classify", message: `${errorCount} of ${ids.length} failed (${firstErrorMsg})` });
