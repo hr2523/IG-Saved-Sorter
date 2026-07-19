@@ -69,6 +69,7 @@ button:disabled { opacity: .45; cursor: default; }
 #limit { width: 82px; }
 #search { min-width: 170px; }
 .icon-btn { width: 34px; height: 34px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.icon-btn.active { background: var(--text); color: var(--bg); border-color: var(--text); }
 
 /* progress + messages */
 .progress { height: 2px; background: transparent; display: none; }
@@ -107,9 +108,15 @@ button:disabled { opacity: .45; cursor: default; }
   text-transform: uppercase; color: var(--text); display: flex; align-items: center; gap: 6px;
 }
 .cat .manual { color: var(--faint); font-weight: 400; }
-.kw { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-.kw li { font-size: 12px; font-weight: 350; color: var(--muted); display: flex; gap: 7px; }
-.kw li::before { content: "–"; color: var(--faint); }
+.kw { margin: 0; }
+.kw > summary { list-style: none; cursor: pointer; user-select: none; font-family: var(--font-mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+.kw > summary::-webkit-details-marker { display: none; }
+.kw > summary::before { content: "▸ "; }
+.kw[open] > summary::before { content: "▾ "; }
+.kw > summary:hover { color: var(--muted); }
+.kw ul { list-style: none; margin: 5px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.kw ul li { font-size: 12px; font-weight: 350; color: var(--muted); display: flex; gap: 7px; }
+.kw ul li::before { content: "–"; color: var(--faint); }
 .foot { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; }
 .conf { flex: 1; height: 2px; background: var(--line); border-radius: 2px; overflow: hidden; margin-right: 10px; }
 .conf > i { display: block; height: 100%; background: var(--faint); }

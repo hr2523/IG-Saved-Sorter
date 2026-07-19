@@ -10,7 +10,7 @@ with CLIP. Two deliverables live in this repo:
   user's saved posts *in their logged-in browser* (no login/2FA), classifies in-browser
   with transformers.js CLIP, and shows a gallery. **All recent work is here.**
 
-Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.9.0**
+Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.9.1**
 (see `extension/manifest.json`). GitHub repo scope: `hr2523/ig-saved-sorter`.
 
 ---
@@ -161,6 +161,21 @@ Done recently (from an adversarial code review — 21 verified findings):
   (existing installs' frozen `categories` get replaced once, threshold/weights preserved) +
   **Reset categories** button. Existing posts need a **Re-classify all** to gain `categories`
   and be re-scored; legacy single-`category` records render via a `postCategories()` fallback.
+- **v0.9.1** — **crawl-cap fixes + collapsible keywords.** A user with >2474 saved posts
+  couldn't fetch past ~2474. Causes: (1) sync fell back to DOM-scroll (weak, plateaus) because
+  the interceptor didn't capture IG's request in the single 9s window; (2) the resume `frontier`
+  cursor was written every page but **never read** (`cursor` hard-coded to `""` at replay-loop
+  init), so partial crawls re-walked page 1 to the same wall; (3) a latched `complete` flag made
+  re-runs incremental. Fixes: loop the nudge (`nudgeScroll` now scrolls up+down; up to ~24s over
+  6 cycles) to reliably capture IG's request → **prefer replay over scroll**; **seed the replay
+  cursor from `resume.frontier`** for interrupted full crawls; new **`MSG.RESET_SYNC`** →
+  `clearResume()` only (keeps posts) wired to a **Force full re-sync** button (gallery Settings +
+  popup); `MSG.DONE` now carries `fetchComplete`/`fetched` so a **partial fetch is surfaced**
+  ("may be incomplete — Sync to resume") instead of a plain "Done". Keywords on gallery cards are
+  now a per-card `<details>` (collapsed by default) plus a header **#** toggle for global
+  show/hide (persisted in `localStorage`, mirrors the theme toggle). NOTE: if IG genuinely stops
+  giving a cursor at ~2474 (`fetch: replay finished (… complete)`), that's an IG-side limit no
+  client fix can beat — read the fetch logs to tell replay-vs-scroll and complete-vs-partial.
 
 ### Not yet done (remaining verified review findings, lower priority)
 - Gallery re-reads all posts + re-decodes all thumbnails every 1.5s during classify

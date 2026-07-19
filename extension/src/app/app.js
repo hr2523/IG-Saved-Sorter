@@ -6,7 +6,7 @@ import { getLogs, clearLogs } from "../lib/log.js";
 
 const $ = (id) => document.getElementById(id);
 
-let STATE = { posts: [], filter: "*", search: "", settings: null };
+let STATE = { posts: [], filter: "*", search: "", showKeywords: false, settings: null };
 let objectUrls = [];
 
 // Multi-label read with legacy fallback: older records have only `category`.
@@ -112,7 +112,10 @@ async function renderGrid() {
       <div class="thumb"><span class="none">no preview</span></div>
       <div class="meta">
         <div class="cat">${catInner}${p.manualOverride ? ` <span class="manual">· edited</span>` : ""}</div>
-        <ul class="kw">${kws.map((k) => `<li>${escapeHtml(k)}</li>`).join("") || `<li style="color:var(--faint)">no keywords</li>`}</ul>
+        <details class="kw"${STATE.showKeywords ? " open" : ""}>
+          <summary>keywords${kws.length ? ` (${kws.length})` : ""}</summary>
+          <ul>${kws.map((k) => `<li>${escapeHtml(k)}</li>`).join("") || `<li style="color:var(--faint)">no keywords</li>`}</ul>
+        </details>
         <div class="foot">
           <span class="conf"><i style="width:${conf}%"></i></span>
           ${p.permalink ? `<a class="open" href="${p.permalink}" target="_blank" rel="noopener">open ↗</a>` : ""}
@@ -203,7 +206,9 @@ chrome.runtime.onMessage.addListener((m) => {
     setBusy(false);
     $("reclassify").disabled = false;
     $("bar").style.width = "100%";
-    setMsg(`Done — ${m.total} post(s).`);
+    setMsg(m.fetchComplete === false
+      ? `Fetched ${m.fetched ?? m.total} — may be incomplete. Click Sync to resume, or “Force full re-sync” in Settings.`
+      : `Done — ${m.total} post(s).`);
     load();
   } else if (m.type === MSG.ERROR) {
     setBusy(false);
@@ -311,6 +316,17 @@ $("clearData").onclick = async () => {
   load();
 };
 
+$("resetSync").onclick = async () => {
+  if (!confirm("Re-crawl all saved posts from scratch? Keeps existing posts — use this if Sync stopped short of your real total.")) return;
+  await chrome.runtime.sendMessage({ type: MSG.RESET_SYNC });
+  $("drawer").hidden = true;
+  setBusy(true);
+  setMsg("Re-syncing from scratch…");
+  $("bar").style.width = "8%";
+  const limit = $("limit").value.trim() ? parseInt($("limit").value, 10) : undefined;
+  await chrome.runtime.sendMessage({ type: MSG.START_SYNC, limit });
+};
+
 // --- theme (auto -> light -> dark) --------------------------------------
 const THEMES = ["auto", "light", "dark"];
 const THEME_ICON = { auto: "◐", light: "☀", dark: "☾" };
@@ -325,5 +341,16 @@ $("themeBtn").onclick = () => {
   applyTheme(THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]);
 };
 applyTheme(localStorage.getItem("igss-theme") || "auto");
+
+// --- keyword visibility (global show/hide; per-card <details> handles the rest) ---
+function applyKwBtn() { $("kwBtn").classList.toggle("active", STATE.showKeywords); }
+$("kwBtn").onclick = () => {
+  STATE.showKeywords = !STATE.showKeywords;
+  localStorage.setItem("igss-kw", STATE.showKeywords ? "1" : "0");
+  applyKwBtn();
+  renderGrid();
+};
+STATE.showKeywords = localStorage.getItem("igss-kw") === "1";
+applyKwBtn();
 
 load();

@@ -58,6 +58,22 @@ $("clear").onclick = async () => {
   refreshCount();
 };
 
+$("resync").onclick = async () => {
+  if (!confirm("Re-crawl all saved posts from scratch? Keeps existing posts — use this if Sync stopped short of your real total.")) return;
+  await chrome.runtime.sendMessage({ type: MSG.RESET_SYNC });
+  setBusy(true);
+  setMsg("Re-syncing from scratch…");
+  bar.style.width = "8%";
+  const limitVal = $("limit").value.trim();
+  const limit = limitVal ? parseInt(limitVal, 10) : undefined;
+  try {
+    await chrome.runtime.sendMessage({ type: MSG.START_SYNC, limit });
+  } catch (e) {
+    setMsg(String(e.message || e), true);
+    setBusy(false);
+  }
+};
+
 chrome.runtime.onMessage.addListener((m) => {
   if (!m || !m.type) return;
   if (m.type === MSG.PROGRESS) {
@@ -67,7 +83,9 @@ chrome.runtime.onMessage.addListener((m) => {
   } else if (m.type === MSG.DONE) {
     setBusy(false);
     bar.style.width = "100%";
-    setMsg(`Done — ${m.total} post(s). Open the gallery to review.`);
+    setMsg(m.fetchComplete === false
+      ? `Fetched ${m.fetched ?? m.total} — may be incomplete. Sync again to resume.`
+      : `Done — ${m.total} post(s). Open the gallery to review.`);
     refreshCount();
   } else if (m.type === MSG.ERROR) {
     setBusy(false);

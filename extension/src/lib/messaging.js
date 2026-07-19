@@ -9,6 +9,7 @@ export const MSG = {
   LIST_COLLECTIONS: "LIST_COLLECTIONS",
   RECLASSIFY_ALL: "RECLASSIFY_ALL",
   CLEAR_DATA: "CLEAR_DATA",
+  RESET_SYNC: "RESET_SYNC", // clear the resume cursor/complete flag (keeps posts) -> forces a fresh full crawl
 
   // service worker -> content script (runs on instagram.com)
   FETCH_COLLECTIONS: "FETCH_COLLECTIONS",

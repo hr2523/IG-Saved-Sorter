@@ -338,7 +338,14 @@ async function nudgeScroll(tabId) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId }, world: "MAIN",
-      func: () => window.scrollTo(0, document.body.scrollHeight),
+      func: () => {
+        // Scroll up a bit, then back to the bottom, to re-trip Instagram's
+        // infinite-scroll observer — a plain scroll-to-bottom when already at the
+        // bottom often won't fire another saved-feed request.
+        const h = document.body.scrollHeight;
+        window.scrollTo(0, Math.max(0, h - Math.floor(window.innerHeight * 1.5)));
+        setTimeout(() => window.scrollTo(0, document.body.scrollHeight), 150);
+      },
     });
   } catch (_) {}
 }
@@ -487,18 +494,27 @@ async function runSync({ limit } = {}) {
     // Incremental (fast, stop-when-nothing-new) only once we've fully crawled
     // this feed before; otherwise do a full crawl to the true end.
     const incremental = resume.complete === true;
+    // Resume an interrupted full crawl from the saved frontier cursor instead of
+    // re-walking from page 1 to the same wall. Fresh/incremental runs start at top.
+    const startCursor = (!incremental && resume.frontier) ? resume.frontier : "";
+    if (startCursor) addLog("info", "fetch: resuming from saved cursor");
 
     // 1) Trigger Instagram's own request so the interceptor grabs the template.
-    await nudgeScroll(tabId);
-    await waitFor(() => capture.template || capture.pages.length, 9000);
-    await drainCaptured();
+    //    IG only fires the saved-feed fetch on some scrolls, so nudge repeatedly
+    //    (up to ~24s across several cycles) rather than a single 9s wait before
+    //    giving up to the weaker scroll fallback.
+    for (let tries = 0; tries < 6 && !capture.template && !cancelRequested; tries++) {
+      await nudgeScroll(tabId);
+      await waitFor(() => capture.template || capture.pages.length, 4000);
+      await drainCaptured();
+    }
     addLog("info", `fetch: template=${!!capture.template}, mode=${incremental ? "incremental" : "full-crawl"}`);
 
-    let partial = false;
-    // 2) Primary: replay the captured request from page 1 with cursors (no scroll).
+    let partial = false, reachedEnd = false;
+    // 2) Primary: replay the captured request with cursors (no scroll).
     if (capture.template) {
       addLog("info", "fetch: using API replay (no scroll)");
-      let cursor = "", pages = 0, stale = 0, reachedEnd = false;
+      let cursor = startCursor, pages = 0, stale = 0;
       while (pages < MAX_PAGES && !cancelRequested && !(limit && stored >= limit)) {
         const raw = await replayWithRetry(tabId, capture.template, cursor);
         if (!raw) { partial = true; addLog("error", `replay stopped at page ${pages + 1}`); break; }
@@ -529,7 +545,7 @@ async function runSync({ limit } = {}) {
 
     broadcast({ type: MSG.PROGRESS, phase: "classify", done: 0, total: seen.size, message: "Classifying…" });
     await classifyPending();
-    broadcast({ type: MSG.DONE, total: await countPosts() });
+    broadcast({ type: MSG.DONE, total: await countPosts(), fetchComplete: capture.template ? reachedEnd : false, fetched: seen.size });
   } catch (e) {
     broadcast({ type: MSG.ERROR, where: "sync", message: String(e.message || e) });
   } finally {
@@ -635,6 +651,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     case MSG.CLEAR_DATA:
       Promise.all([clearAll(), clearResume()]).then(() => sendResponse({ ok: true }));
+      return true;
+
+    case MSG.RESET_SYNC:
+      // Forget the crawl cursor/complete flag so the next Sync does a fresh full
+      // crawl. Keeps all posts + thumbnails (unlike CLEAR_DATA).
+      clearResume().then(() => sendResponse({ ok: true }));
       return true;
   }
 });
