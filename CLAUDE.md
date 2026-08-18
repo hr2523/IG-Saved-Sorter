@@ -10,7 +10,7 @@ with CLIP. Two deliverables live in this repo:
   user's saved posts *in their logged-in browser* (no login/2FA), classifies in-browser
   with transformers.js CLIP, and shows a gallery. **All recent work is here.**
 
-Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.9.3**
+Active branch: **`claude/ig-saved-media-sorter-D1tAe`**. Current version: **0.9.4**
 (see `extension/manifest.json`). GitHub repo scope: `hr2523/ig-saved-sorter`.
 
 ---
@@ -87,6 +87,12 @@ its thumbnail blob exist; `needs_thumb`/`error` are retryable.
 - **Offscreen docs can only use `chrome.runtime`** — NOT `chrome.storage` (settings are
   passed into the classifier via message). Service workers **cannot use dynamic `import()`**
   (use static imports).
+- **MV3 kills an idle service worker after ~30s, and `setTimeout` does NOT count as
+  activity.** Any long `await sleep(...)` in the SW (throttle backoff, cool-down) silently
+  killed the whole sync mid-crawl — the likely cause of the long-standing "crawl stops at a
+  random point" symptom. Use `keepAliveSleep` (chunked sleep + a trivial chrome API touch
+  every ≤15s) for any wait that can exceed ~20s; the `sync-watchdog` alarm (v0.9.4)
+  auto-resumes from the frontier cursor if the worker dies anyway.
 - **Instagram is GraphQL-only now** — the private REST endpoints 404, which is why fetching
   is done by intercepting IG's own request and replaying it, not by calling a hardcoded API.
 
@@ -199,6 +205,20 @@ Done recently (from an adversarial code review — 21 verified findings):
   the user's 0.9.2+ fetch logs to confirm which path (replay vs scroll, complete vs partial); if
   replay consistently hits a clean `more_available:false` at a stable point, that's IG's true
   end-of-feed for the account and unbeatable client-side.
+- **v0.9.4** — **MV3 worker-death fix (the probable real "random stop" cause).** Found while
+  answering "are we working smart?": Chrome kills an idle MV3 service worker after ~30s and
+  `setTimeout` doesn't count as activity — so 0.9.3's *patience* (backoffs to 120s, cool-downs
+  60–90s as plain `sleep`s) guaranteed the worker died the moment IG throttled, silently ending
+  the sync at a variable point. Fixes in `service-worker.js`: **`keepAliveSleep`** (≤15s chunks,
+  each touching `chrome.storage` to reset the idle timer) for the backoff + cool-down waits; and
+  a **`sync-watchdog` `chrome.alarms`** watchdog (new `alarms` permission) — `runSync` persists a
+  `syncJob{active,opts,resumes}` record, `finally` clears it (only runs if the worker lived), and
+  the 1-min alarm re-spawns a dead worker, sees `active && !syncing`, and auto-resumes
+  `runSync` from the frontier cursor, bounded at 3 resumes (resume count preserved across the
+  restart; Cancel while dead clears the job so it can't resurrect). Log markers:
+  `watchdog: sync was interrupted (worker died) — auto-resuming from saved cursor (n/3)`.
+  Deferred by user choice: importing IG's official data export (`saved_posts.json`, guaranteed
+  complete list) — build only if a 0.9.4 sync still comes up short.
 
 ### Not yet done (remaining verified review findings, lower priority)
 - Gallery re-reads all posts + re-decodes all thumbnails every 1.5s during classify

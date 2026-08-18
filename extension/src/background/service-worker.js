@@ -40,6 +40,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Jittered inter-page delay so we don't hammer IG on a fixed cadence (trips rate limits).
 const pageDelay = () => PAGE_DELAY_MS + Math.floor(Math.random() * 800);
 
+// Chrome kills an idle MV3 service worker after ~30s, and plain setTimeout does
+// NOT count as activity — so a long throttle backoff would silently kill the
+// whole sync mid-crawl. For any potentially-long wait, sleep in short chunks and
+// touch a trivial extension API each chunk to reset the idle timer.
+async function keepAliveSleep(ms) {
+  const end = Date.now() + ms;
+  for (let left = ms; left > 0; left = end - Date.now()) {
+    await sleep(Math.min(left, 15000));
+    try { await chrome.storage.local.get("__keepalive"); } catch (_) {}
+  }
+}
+
+// Watchdog: if the worker dies anyway (throttle wait, crash, machine sleep), a
+// persisted job record + a periodic alarm re-spawn the worker and auto-resume
+// the sync from the saved frontier cursor instead of stopping silently.
+const WATCHDOG_ALARM = "sync-watchdog";
+const WATCHDOG_MAX_RESUMES = 3;
+async function getSyncJob() {
+  try { return (await chrome.storage.local.get("syncJob")).syncJob || null; } catch (_) { return null; }
+}
+async function setSyncJob(job) {
+  try { await chrome.storage.local.set({ syncJob: job }); } catch (_) {}
+}
+
 // --- instagram tab ------------------------------------------------------
 async function getInstagramTab() {
   const tabs = await chrome.tabs.query({ url: "https://www.instagram.com/*" });
@@ -418,7 +442,7 @@ async function replayWithRetry(tabId, template, cursor) {
     const ra = res && res.__retryAfter ? parseInt(res.__retryAfter, 10) * 1000 : 0;
     const wait = Math.min(ra || PAGE_DELAY_MS * Math.pow(2, attempt), 120000);
     addLog("info", `replay throttled (${status || "network"}), backoff ${Math.round(wait / 1000)}s (try ${attempt + 1}/${REPLAY_TRIES})`);
-    await sleep(wait);
+    await keepAliveSleep(wait);
   }
   return null;
 }
@@ -446,6 +470,13 @@ async function runSync({ limit } = {}) {
   if (syncing) return;
   syncing = true;
   cancelRequested = false;
+  // Persist the job + arm the watchdog. Preserve the resume count when this IS a
+  // watchdog resume (job still active from the died run); fresh syncs start at 0.
+  {
+    const prev = await getSyncJob();
+    await setSyncJob({ active: true, opts: { limit }, resumes: prev && prev.active ? prev.resumes || 0 : 0 });
+    chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: 1 });
+  }
   resetCapture();
   try {
     const tabId = await getActiveSavedTab();
@@ -546,7 +577,7 @@ async function runSync({ limit } = {}) {
             cools++;
             const cool = 60000 + Math.floor(Math.random() * 30000);
             addLog("info", `replay cooling ${Math.round(cool / 1000)}s then resuming (${cools}/${MAX_COOL})`);
-            await sleep(cool);
+            await keepAliveSleep(cool);
             continue;
           }
           partial = true; addLog("error", `replay stopped at page ${pages + 1} (throttled)`); break;
@@ -595,6 +626,10 @@ async function runSync({ limit } = {}) {
   } catch (e) {
     broadcast({ type: MSG.ERROR, where: "sync", message: String(e.message || e) });
   } finally {
+    // Only reached if the worker is still alive — a killed worker leaves the job
+    // `active`, which is exactly what the watchdog alarm looks for.
+    await setSyncJob({ active: false });
+    try { await chrome.alarms.clear(WATCHDOG_ALARM); } catch (_) {}
     syncing = false;
   }
 }
@@ -651,6 +686,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     case MSG.CANCEL_SYNC:
       cancelRequested = true;
+      // If no sync is running in THIS worker instance (e.g. it died and restarted),
+      // clear the persisted job too so the watchdog doesn't resurrect a cancelled sync.
+      if (!syncing) { setSyncJob({ active: false }); chrome.alarms.clear(WATCHDOG_ALARM); }
       sendResponse({ ok: true });
       return true;
 
@@ -705,4 +743,26 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       clearResume().then(() => sendResponse({ ok: true }));
       return true;
   }
+});
+
+// Watchdog: fires every minute while a sync job is armed. If the job is still
+// marked active but no sync is running in this worker instance, Chrome killed the
+// worker mid-sync (long throttle wait, crash, machine sleep) — auto-resume from
+// the persisted frontier cursor instead of stopping silently. Bounded so a
+// repeatedly-dying sync can't loop forever. The alarm itself re-spawns the worker.
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== WATCHDOG_ALARM) return;
+  const job = await getSyncJob();
+  if (!job || !job.active || syncing) return;
+  if ((job.resumes || 0) >= WATCHDOG_MAX_RESUMES) {
+    await setSyncJob({ active: false });
+    try { await chrome.alarms.clear(WATCHDOG_ALARM); } catch (_) {}
+    addLog("error", `watchdog: sync died ${WATCHDOG_MAX_RESUMES}x — giving up; click Sync to resume manually`);
+    return;
+  }
+  job.resumes = (job.resumes || 0) + 1;
+  await setSyncJob(job);
+  addLog("info", `watchdog: sync was interrupted (worker died) — auto-resuming from saved cursor (${job.resumes}/${WATCHDOG_MAX_RESUMES})`);
+  broadcast({ type: MSG.PROGRESS, phase: "fetch", done: 0, total: null, message: "Sync was interrupted — auto-resuming…", noLog: true });
+  runSync(job.opts || {});
 });
